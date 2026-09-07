@@ -4092,7 +4092,7 @@ static void vk_create_sync_primitives( void ) {
 	VK_CHECK( qvkCreateSemaphore( vk.device, &desc, NULL, &vk.renderingCompleteSem ) );
 	SET_OBJECT_NAME( vk.renderingCompleteSem, "rendering complete semaphore", VK_DEBUG_REPORT_OBJECT_TYPE_SEMAPHORE_EXT );
 
-	// GPU frame time: three timestamps per frame slot (r_gpuTimeLog)
+	// GPU frame time: a run of stamps per frame slot (r_gpuTimeLog)
 	vk.gpuTimePool = VK_NULL_HANDLE;
 	vk.gpuTime.count = 0;
 	if ( vk.timestampPeriod > 0.0f ) {
@@ -4101,7 +4101,7 @@ static void vk_create_sync_primitives( void ) {
 		Com_Memset( &query_desc, 0, sizeof( query_desc ) );
 		query_desc.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
 		query_desc.queryType = VK_QUERY_TYPE_TIMESTAMP;
-		query_desc.queryCount = NUM_COMMAND_BUFFERS * 3;
+		query_desc.queryCount = NUM_COMMAND_BUFFERS * GPU_TIME_MAX_STAMPS;
 		VK_CHECK( qvkCreateQueryPool( vk.device, &query_desc, NULL, &vk.gpuTimePool ) );
 		SET_OBJECT_NAME( vk.gpuTimePool, "gpu time query pool", VK_DEBUG_REPORT_OBJECT_TYPE_QUERY_POOL_EXT );
 	}
@@ -4109,6 +4109,7 @@ static void vk_create_sync_primitives( void ) {
 		vk.tess[i].gpu_time_armed = qfalse;
 		vk.tess[i].gpu_time_scene_marked = qfalse;
 		vk.tess[i].gpu_time_pending = qfalse;
+		vk.tess[i].gpu_time_count = 0;
 	}
 }
 
@@ -8183,6 +8184,7 @@ void vk_begin_hud_render_pass( qboolean clear )
 		qvkCmdEndRenderPass( vk.cmd->command_buffer );
 		vk.inRenderPass = qfalse;
 	}
+	vk_gpu_time_stamp( GPU_TIME_HUD_BEGIN );
 
 	// Set up clear values
 	// Color: not cleared here (LOAD_OP_LOAD), but value must be provided for array indexing
@@ -8285,6 +8287,7 @@ void vk_end_hud_render_pass( void )
 	// End the HUD render pass
 	qvkCmdEndRenderPass( vk.cmd->command_buffer );
 	vk.inRenderPass = qfalse;
+	vk_gpu_time_stamp( GPU_TIME_HUD_END );
 
 	// HUD image is now in SHADER_READ_ONLY_OPTIMAL layout (from render pass finalLayout)
 
@@ -8381,32 +8384,44 @@ static int vk_gpu_time_compare( const void *a, const void *b )
 }
 
 
+static const char *gpuTimeLabelNames[GPU_TIME_LABELS] = {
+	"start", "scene", "main end", "bloom", "to hud", "hud", "eye end", "gamma", "end"
+};
+
+
 /*
 ==================
 vk_gpu_time_collect
 
 This slot's stamps from its last frame, readable now that its fence was
-waited on, into the r_gpuTimeLog window; one report per window. The desktop
-mirror blit is a separate submission and is not in the span.
+waited on, into the r_gpuTimeLog window; one report per window. Each
+interval goes to the label of the stamp that closes it, summed when a label
+repeats within a frame. The desktop mirror blit is a separate submission and
+is not in the span.
 ==================
 */
 static void vk_gpu_time_collect( void )
 {
-	uint64_t results[6];  // start, scene end, frame end, each followed by its availability
-	const uint32_t first = vk.cmd_index * 3;
-	int window, n;
+	uint64_t results[GPU_TIME_MAX_STAMPS * 2];  // each stamp followed by its availability
+	const uint32_t first = vk.cmd_index * GPU_TIME_MAX_STAMPS;
+	const uint32_t count = vk.cmd->gpu_time_count;
+	float sums[GPU_TIME_LABELS];
+	int window, n, i;
+	uint32_t s;
 
 	if ( !vk.cmd->gpu_time_pending ) {
 		return;
 	}
 	vk.cmd->gpu_time_pending = qfalse;
 
-	if ( qvkGetQueryPoolResults( vk.device, vk.gpuTimePool, first, 3, sizeof( results ), results,
+	if ( count < 2 || qvkGetQueryPoolResults( vk.device, vk.gpuTimePool, first, count, sizeof( results ), results,
 			2 * sizeof( uint64_t ), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT ) != VK_SUCCESS ) {
 		return;
 	}
-	if ( !results[1] || !results[3] || !results[5] || results[2] < results[0] || results[4] < results[2] ) {
-		return;
+	for ( s = 0; s < count; s++ ) {
+		if ( !results[s * 2 + 1] || ( s > 0 && results[s * 2] < results[s * 2 - 2] ) ) {
+			return;
+		}
 	}
 
 	window = r_gpuTimeLog->integer;
@@ -8418,19 +8433,30 @@ static void vk_gpu_time_collect( void )
 		window = ARRAY_LEN( vk.gpuTime.ms );
 	}
 
-	vk.gpuTime.sceneMs[vk.gpuTime.count] = (float)( (double)( results[2] - results[0] ) * vk.timestampPeriod * 1e-6 );
-	vk.gpuTime.ms[vk.gpuTime.count++] = (float)( (double)( results[4] - results[0] ) * vk.timestampPeriod * 1e-6 );
+	Com_Memset( sums, 0, sizeof( sums ) );
+	for ( s = 1; s < count; s++ ) {
+		sums[vk.cmd->gpu_time_label[s]] += (float)( (double)( results[s * 2] - results[s * 2 - 2] ) * vk.timestampPeriod * 1e-6 );
+	}
+	for ( i = 0; i < GPU_TIME_LABELS; i++ ) {
+		vk.gpuTime.label[i][vk.gpuTime.count] = sums[i];
+	}
+	vk.gpuTime.ms[vk.gpuTime.count++] = (float)( (double)( results[( count - 1 ) * 2] - results[0] ) * vk.timestampPeriod * 1e-6 );
 	if ( vk.gpuTime.count < window ) {
 		return;
 	}
 
 	n = vk.gpuTime.count;
 	qsort( vk.gpuTime.ms, n, sizeof( float ), vk_gpu_time_compare );
-	qsort( vk.gpuTime.sceneMs, n, sizeof( float ), vk_gpu_time_compare );
-	ri.Printf( PRINT_ALL, "GPU time over %i frames: frame median %.2f ms, p99 %.2f, max %.2f; scene median %.2f ms, p99 %.2f, max %.2f (%.0f%% of the frame)\n",
-		n, vk.gpuTime.ms[n / 2], vk.gpuTime.ms[( n * 99 ) / 100], vk.gpuTime.ms[n - 1],
-		vk.gpuTime.sceneMs[n / 2], vk.gpuTime.sceneMs[( n * 99 ) / 100], vk.gpuTime.sceneMs[n - 1],
-		vk.gpuTime.ms[n / 2] > 0.0f ? 100.0f * vk.gpuTime.sceneMs[n / 2] / vk.gpuTime.ms[n / 2] : 0.0f );
+	ri.Printf( PRINT_ALL, "GPU time over %i frames: frame median %.2f ms, p99 %.2f, max %.2f;",
+		n, vk.gpuTime.ms[n / 2], vk.gpuTime.ms[( n * 99 ) / 100], vk.gpuTime.ms[n - 1] );
+	for ( i = 1; i < GPU_TIME_LABELS; i++ ) {
+		qsort( vk.gpuTime.label[i], n, sizeof( float ), vk_gpu_time_compare );
+		// an interval no frame in the window had is left out
+		if ( vk.gpuTime.label[i][n - 1] > 0.0f ) {
+			ri.Printf( PRINT_ALL, " %s %.2f", gpuTimeLabelNames[i], vk.gpuTime.label[i][n / 2] );
+		}
+	}
+	ri.Printf( PRINT_ALL, " (medians)\n" );
 	vk.gpuTime.count = 0;
 }
 
@@ -8438,15 +8464,36 @@ static void vk_gpu_time_collect( void )
 // Top of the slot's command buffer: the frame's first timestamp
 static void vk_gpu_time_begin( void )
 {
-	const uint32_t first = vk.cmd_index * 3;
+	const uint32_t first = vk.cmd_index * GPU_TIME_MAX_STAMPS;
 
+	vk.cmd->gpu_time_count = 0;
 	if ( vk.gpuTimePool == VK_NULL_HANDLE || r_gpuTimeLog->integer <= 0 ) {
 		return;
 	}
-	qvkCmdResetQueryPool( vk.cmd->command_buffer, vk.gpuTimePool, first, 3 );
+	qvkCmdResetQueryPool( vk.cmd->command_buffer, vk.gpuTimePool, first, GPU_TIME_MAX_STAMPS );
 	qvkCmdWriteTimestamp( vk.cmd->command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, vk.gpuTimePool, first );
+	vk.cmd->gpu_time_label[0] = GPU_TIME_START;
+	vk.cmd->gpu_time_count = 1;
 	vk.cmd->gpu_time_armed = qtrue;
 	vk.cmd->gpu_time_scene_marked = qfalse;
+}
+
+
+/*
+==================
+vk_gpu_time_stamp
+
+Closes the interval that began at the previous stamp under the given label.
+==================
+*/
+void vk_gpu_time_stamp( gpuTimeLabel_t label )
+{
+	if ( !vk.cmd || !vk.cmd->gpu_time_armed || !vk.recordingCommands || vk.cmd->gpu_time_count >= GPU_TIME_MAX_STAMPS ) {
+		return;
+	}
+	qvkCmdWriteTimestamp( vk.cmd->command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, vk.gpuTimePool,
+		vk.cmd_index * GPU_TIME_MAX_STAMPS + vk.cmd->gpu_time_count );
+	vk.cmd->gpu_time_label[vk.cmd->gpu_time_count++] = (byte)label;
 }
 
 
@@ -8460,10 +8507,10 @@ starts; a frame without one (menus) counts everything as scene.
 */
 void vk_gpu_time_mark_scene( void )
 {
-	if ( !vk.cmd || !vk.cmd->gpu_time_armed || vk.cmd->gpu_time_scene_marked || !vk.recordingCommands ) {
+	if ( !vk.cmd || vk.cmd->gpu_time_scene_marked ) {
 		return;
 	}
-	qvkCmdWriteTimestamp( vk.cmd->command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, vk.gpuTimePool, vk.cmd_index * 3 + 1 );
+	vk_gpu_time_stamp( GPU_TIME_SCENE );
 	vk.cmd->gpu_time_scene_marked = qtrue;
 }
 
@@ -8475,7 +8522,7 @@ static void vk_gpu_time_end( void )
 		return;
 	}
 	vk_gpu_time_mark_scene();
-	qvkCmdWriteTimestamp( vk.cmd->command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, vk.gpuTimePool, vk.cmd_index * 3 + 2 );
+	vk_gpu_time_stamp( GPU_TIME_END );
 	vk.cmd->gpu_time_armed = qfalse;
 	vk.cmd->gpu_time_pending = qtrue;
 }
@@ -8729,6 +8776,7 @@ void vk_end_frame( void )
 
 		// End current render pass before gamma/virtual screen operations
 		vk_end_render_pass();
+		vk_gpu_time_stamp( GPU_TIME_EYE_END );
 
 		// Transition FBO color to shader read for gamma pass
 		// If we just ended post_bloom: FBO is already in SHADER_READ_ONLY_OPTIMAL (from finalLayout)
@@ -8753,6 +8801,7 @@ void vk_end_frame( void )
 			vk.pipeline_layout_post_process, 0, 1, &vk.color_descriptor, 0, NULL );
 		qvkCmdDraw( vk.cmd->command_buffer, 4, 1, 0, 0 );
 		vk_end_render_pass();
+		vk_gpu_time_stamp( GPU_TIME_GAMMA );
 
 		if ( useVirtualScreen ) {
 			vk_render_virtual_screen( vsEyeProj, screenMV, floorMV );
@@ -10611,6 +10660,7 @@ qboolean vk_bloom( void )
 	height = vk.xr.height;
 
 	vk_end_render_pass(); // end main FBO render pass
+	vk_gpu_time_stamp( GPU_TIME_MAIN_END );
 
 	// Transition FBO color to shader read for bloom extraction
 	record_image_layout_transition( vk.cmd->command_buffer,
@@ -10660,6 +10710,8 @@ qboolean vk_bloom( void )
 		qvkCmdDraw( vk.cmd->command_buffer, 4, 1, 0, 0 );
 		vk_end_render_pass();
 	}
+
+	vk_gpu_time_stamp( GPU_TIME_BLOOM );
 
 	// Post-bloom blend - blend blurred images back to FBO
 	{

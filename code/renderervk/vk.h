@@ -324,7 +324,25 @@ void vk_draw_dot( uint32_t storage_offset );
 
 void vk_read_pixels( byte* buffer, uint32_t width, uint32_t height ); // screenshots
 qboolean vk_bloom( void );
-void vk_gpu_time_mark_scene( void );  // r_gpuTimeLog: the 3D-to-2D boundary stamp
+
+// r_gpuTimeLog: what each interval of the frame is, named by the stamp that closes it
+typedef enum {
+	GPU_TIME_START,		// the frame's first stamp; closes nothing
+	GPU_TIME_SCENE,		// 3D draws up to the 3D-to-2D boundary
+	GPU_TIME_MAIN_END,	// the scene pass's store and resolve
+	GPU_TIME_BLOOM,		// bloom extract and the blur chain
+	GPU_TIME_HUD_BEGIN,	// eye buffer drawing up to a HUD bracket, and the store it forces
+	GPU_TIME_HUD_END,	// the HUD buffer pass
+	GPU_TIME_EYE_END,	// the eye buffer's last pass, 2D and its store
+	GPU_TIME_GAMMA,		// the gamma pass
+	GPU_TIME_END,		// virtual screen and whatever else precedes the end
+	GPU_TIME_LABELS
+} gpuTimeLabel_t;
+
+#define GPU_TIME_MAX_STAMPS 16
+
+void vk_gpu_time_stamp( gpuTimeLabel_t label );
+void vk_gpu_time_mark_scene( void );  // the 3D-to-2D boundary, once per frame
 
 qboolean vk_alloc_vbo( const byte *vbo_data, int vbo_size );
 void vk_update_mvp( const float *m );
@@ -365,6 +383,8 @@ typedef struct vk_tess_s {
 	qboolean gpu_time_armed;
 	qboolean gpu_time_scene_marked;	// the 3D-to-2D boundary stamp was written
 	qboolean gpu_time_pending;
+	uint32_t gpu_time_count;		// stamps written this frame, the start included
+	byte gpu_time_label[GPU_TIME_MAX_STAMPS];
 
 	VkBuffer vertex_buffer;
 	byte *vertex_buffer_ptr; // pointer to mapped vertex buffer
@@ -656,13 +676,13 @@ typedef struct {
 		uint32_t push_size_max;
 	} stats;
 
-	// GPU time of the eye buffer frame (r_gpuTimeLog): three timestamps per frame slot,
-	// the frame's start, the 3D-to-2D boundary, and its end
+	// GPU time of the eye buffer frame (r_gpuTimeLog): a stamp at the frame's start and
+	// after each pass; every interval is named by the stamp that closes it
 	VkQueryPool gpuTimePool;
 	float timestampPeriod;		// nanoseconds per tick, zero when the queue cannot timestamp
 	struct {
-		float ms[1024];			// whole frame
-		float sceneMs[1024];	// start to the 3D-to-2D boundary
+		float ms[1024];							// whole frame
+		float label[GPU_TIME_LABELS][1024];		// per-frame sum of the intervals closed by that label
 		int count;
 	} gpuTime;
 
