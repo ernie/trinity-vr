@@ -324,6 +324,7 @@ void vk_draw_dot( uint32_t storage_offset );
 
 void vk_read_pixels( byte* buffer, uint32_t width, uint32_t height ); // screenshots
 qboolean vk_bloom( void );
+void vk_gpu_time_mark_scene( void );  // r_gpuTimeLog: the 3D-to-2D boundary stamp
 
 qboolean vk_alloc_vbo( const byte *vbo_data, int vbo_size );
 void vk_update_mvp( const float *m );
@@ -360,8 +361,9 @@ typedef struct vk_tess_s {
 	VkFence rendering_finished_fence;
 	qboolean waitForFence;
 
-	// r_gpuTimeLog: this slot's timestamp pair, written this frame and read back after its fence
+	// r_gpuTimeLog: this slot's timestamps, written this frame and read back after its fence
 	qboolean gpu_time_armed;
+	qboolean gpu_time_scene_marked;	// the 3D-to-2D boundary stamp was written
 	qboolean gpu_time_pending;
 
 	VkBuffer vertex_buffer;
@@ -654,11 +656,13 @@ typedef struct {
 		uint32_t push_size_max;
 	} stats;
 
-	// GPU time of the eye buffer frame (r_gpuTimeLog): two timestamps per frame slot
+	// GPU time of the eye buffer frame (r_gpuTimeLog): three timestamps per frame slot,
+	// the frame's start, the 3D-to-2D boundary, and its end
 	VkQueryPool gpuTimePool;
 	float timestampPeriod;		// nanoseconds per tick, zero when the queue cannot timestamp
 	struct {
-		float ms[1024];
+		float ms[1024];			// whole frame
+		float sceneMs[1024];	// start to the 3D-to-2D boundary
 		int count;
 	} gpuTime;
 

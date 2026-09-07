@@ -1713,6 +1713,8 @@ static const void *RB_FinishBloom( const void *data )
 	RB_EndSurface();
 
 #ifdef USE_VULKAN
+	vk_gpu_time_mark_scene();
+
 	// 3D->2D boundary. Apply bloom now (before 2D drawing starts), then draw the
 	// deferred main-view coronas on top so they aren't captured by bloom's
 	// bright-pass. vk_bloom() keeps the post_bloom render pass open for the

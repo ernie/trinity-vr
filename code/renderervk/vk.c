@@ -4092,7 +4092,7 @@ static void vk_create_sync_primitives( void ) {
 	VK_CHECK( qvkCreateSemaphore( vk.device, &desc, NULL, &vk.renderingCompleteSem ) );
 	SET_OBJECT_NAME( vk.renderingCompleteSem, "rendering complete semaphore", VK_DEBUG_REPORT_OBJECT_TYPE_SEMAPHORE_EXT );
 
-	// GPU frame time: a timestamp pair per frame slot (r_gpuTimeLog)
+	// GPU frame time: three timestamps per frame slot (r_gpuTimeLog)
 	vk.gpuTimePool = VK_NULL_HANDLE;
 	vk.gpuTime.count = 0;
 	if ( vk.timestampPeriod > 0.0f ) {
@@ -4101,12 +4101,13 @@ static void vk_create_sync_primitives( void ) {
 		Com_Memset( &query_desc, 0, sizeof( query_desc ) );
 		query_desc.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
 		query_desc.queryType = VK_QUERY_TYPE_TIMESTAMP;
-		query_desc.queryCount = NUM_COMMAND_BUFFERS * 2;
+		query_desc.queryCount = NUM_COMMAND_BUFFERS * 3;
 		VK_CHECK( qvkCreateQueryPool( vk.device, &query_desc, NULL, &vk.gpuTimePool ) );
 		SET_OBJECT_NAME( vk.gpuTimePool, "gpu time query pool", VK_DEBUG_REPORT_OBJECT_TYPE_QUERY_POOL_EXT );
 	}
 	for ( i = 0; i < NUM_COMMAND_BUFFERS; i++ ) {
 		vk.tess[i].gpu_time_armed = qfalse;
+		vk.tess[i].gpu_time_scene_marked = qfalse;
 		vk.tess[i].gpu_time_pending = qfalse;
 	}
 }
@@ -8384,27 +8385,27 @@ static int vk_gpu_time_compare( const void *a, const void *b )
 ==================
 vk_gpu_time_collect
 
-This slot's pair from its last frame, readable now that its fence was waited
-on, into the r_gpuTimeLog window; one report per window. The desktop mirror
-blit is a separate submission and is not in the span.
+This slot's stamps from its last frame, readable now that its fence was
+waited on, into the r_gpuTimeLog window; one report per window. The desktop
+mirror blit is a separate submission and is not in the span.
 ==================
 */
 static void vk_gpu_time_collect( void )
 {
-	uint64_t results[4];  // start, its availability, end, its availability
-	const uint32_t first = vk.cmd_index * 2;
-	int window;
+	uint64_t results[6];  // start, scene end, frame end, each followed by its availability
+	const uint32_t first = vk.cmd_index * 3;
+	int window, n;
 
 	if ( !vk.cmd->gpu_time_pending ) {
 		return;
 	}
 	vk.cmd->gpu_time_pending = qfalse;
 
-	if ( qvkGetQueryPoolResults( vk.device, vk.gpuTimePool, first, 2, sizeof( results ), results,
+	if ( qvkGetQueryPoolResults( vk.device, vk.gpuTimePool, first, 3, sizeof( results ), results,
 			2 * sizeof( uint64_t ), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT ) != VK_SUCCESS ) {
 		return;
 	}
-	if ( !results[1] || !results[3] || results[2] < results[0] ) {
+	if ( !results[1] || !results[3] || !results[5] || results[2] < results[0] || results[4] < results[2] ) {
 		return;
 	}
 
@@ -8417,15 +8418,19 @@ static void vk_gpu_time_collect( void )
 		window = ARRAY_LEN( vk.gpuTime.ms );
 	}
 
-	vk.gpuTime.ms[vk.gpuTime.count++] = (float)( (double)( results[2] - results[0] ) * vk.timestampPeriod * 1e-6 );
+	vk.gpuTime.sceneMs[vk.gpuTime.count] = (float)( (double)( results[2] - results[0] ) * vk.timestampPeriod * 1e-6 );
+	vk.gpuTime.ms[vk.gpuTime.count++] = (float)( (double)( results[4] - results[0] ) * vk.timestampPeriod * 1e-6 );
 	if ( vk.gpuTime.count < window ) {
 		return;
 	}
 
-	qsort( vk.gpuTime.ms, vk.gpuTime.count, sizeof( float ), vk_gpu_time_compare );
-	ri.Printf( PRINT_ALL, "GPU frame time over %i frames: median %.2f ms, p95 %.2f ms, max %.2f ms\n",
-		vk.gpuTime.count, vk.gpuTime.ms[vk.gpuTime.count / 2], vk.gpuTime.ms[( vk.gpuTime.count * 95 ) / 100],
-		vk.gpuTime.ms[vk.gpuTime.count - 1] );
+	n = vk.gpuTime.count;
+	qsort( vk.gpuTime.ms, n, sizeof( float ), vk_gpu_time_compare );
+	qsort( vk.gpuTime.sceneMs, n, sizeof( float ), vk_gpu_time_compare );
+	ri.Printf( PRINT_ALL, "GPU time over %i frames: frame median %.2f ms, p99 %.2f, max %.2f; scene median %.2f ms, p99 %.2f, max %.2f (%.0f%% of the frame)\n",
+		n, vk.gpuTime.ms[n / 2], vk.gpuTime.ms[( n * 99 ) / 100], vk.gpuTime.ms[n - 1],
+		vk.gpuTime.sceneMs[n / 2], vk.gpuTime.sceneMs[( n * 99 ) / 100], vk.gpuTime.sceneMs[n - 1],
+		vk.gpuTime.ms[n / 2] > 0.0f ? 100.0f * vk.gpuTime.sceneMs[n / 2] / vk.gpuTime.ms[n / 2] : 0.0f );
 	vk.gpuTime.count = 0;
 }
 
@@ -8433,14 +8438,33 @@ static void vk_gpu_time_collect( void )
 // Top of the slot's command buffer: the frame's first timestamp
 static void vk_gpu_time_begin( void )
 {
-	const uint32_t first = vk.cmd_index * 2;
+	const uint32_t first = vk.cmd_index * 3;
 
 	if ( vk.gpuTimePool == VK_NULL_HANDLE || r_gpuTimeLog->integer <= 0 ) {
 		return;
 	}
-	qvkCmdResetQueryPool( vk.cmd->command_buffer, vk.gpuTimePool, first, 2 );
+	qvkCmdResetQueryPool( vk.cmd->command_buffer, vk.gpuTimePool, first, 3 );
 	qvkCmdWriteTimestamp( vk.cmd->command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, vk.gpuTimePool, first );
 	vk.cmd->gpu_time_armed = qtrue;
+	vk.cmd->gpu_time_scene_marked = qfalse;
+}
+
+
+/*
+==================
+vk_gpu_time_mark_scene
+
+The 3D-to-2D boundary, where the backend finishes the scene and bloom
+starts; a frame without one (menus) counts everything as scene.
+==================
+*/
+void vk_gpu_time_mark_scene( void )
+{
+	if ( !vk.cmd || !vk.cmd->gpu_time_armed || vk.cmd->gpu_time_scene_marked || !vk.recordingCommands ) {
+		return;
+	}
+	qvkCmdWriteTimestamp( vk.cmd->command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, vk.gpuTimePool, vk.cmd_index * 3 + 1 );
+	vk.cmd->gpu_time_scene_marked = qtrue;
 }
 
 
@@ -8450,7 +8474,8 @@ static void vk_gpu_time_end( void )
 	if ( !vk.cmd->gpu_time_armed ) {
 		return;
 	}
-	qvkCmdWriteTimestamp( vk.cmd->command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, vk.gpuTimePool, vk.cmd_index * 2 + 1 );
+	vk_gpu_time_mark_scene();
+	qvkCmdWriteTimestamp( vk.cmd->command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, vk.gpuTimePool, vk.cmd_index * 3 + 2 );
 	vk.cmd->gpu_time_armed = qfalse;
 	vk.cmd->gpu_time_pending = qtrue;
 }
