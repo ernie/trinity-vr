@@ -360,6 +360,10 @@ typedef struct vk_tess_s {
 	VkFence rendering_finished_fence;
 	qboolean waitForFence;
 
+	// r_gpuTimeLog: this slot's timestamp pair, written this frame and read back after its fence
+	qboolean gpu_time_armed;
+	qboolean gpu_time_pending;
+
 	VkBuffer vertex_buffer;
 	byte *vertex_buffer_ptr; // pointer to mapped vertex buffer
 	uint32_t vertex_buffer_offset; // VkDeviceSize
@@ -649,6 +653,14 @@ typedef struct {
 		uint32_t push_size;
 		uint32_t push_size_max;
 	} stats;
+
+	// GPU time of the eye buffer frame (r_gpuTimeLog): two timestamps per frame slot
+	VkQueryPool gpuTimePool;
+	float timestampPeriod;		// nanoseconds per tick, zero when the queue cannot timestamp
+	struct {
+		float ms[1024];
+		int count;
+	} gpuTime;
 
 	//
 	// Shader modules.

@@ -86,9 +86,11 @@ static PFN_vkCmdEndRenderPass							qvkCmdEndRenderPass;
 static PFN_vkCmdNextSubpass								qvkCmdNextSubpass;
 static PFN_vkCmdPipelineBarrier							qvkCmdPipelineBarrier;
 static PFN_vkCmdPushConstants							qvkCmdPushConstants;
+static PFN_vkCmdResetQueryPool							qvkCmdResetQueryPool;
 static PFN_vkCmdSetDepthBias							qvkCmdSetDepthBias;
 static PFN_vkCmdSetScissor								qvkCmdSetScissor;
 static PFN_vkCmdSetViewport								qvkCmdSetViewport;
+static PFN_vkCmdWriteTimestamp							qvkCmdWriteTimestamp;
 static PFN_vkCreateBuffer								qvkCreateBuffer;
 static PFN_vkCreateCommandPool							qvkCreateCommandPool;
 static PFN_vkCreateDescriptorPool						qvkCreateDescriptorPool;
@@ -100,6 +102,7 @@ static PFN_vkCreateImage								qvkCreateImage;
 static PFN_vkCreateImageView							qvkCreateImageView;
 static PFN_vkCreatePipelineLayout						qvkCreatePipelineLayout;
 static PFN_vkCreatePipelineCache						qvkCreatePipelineCache;
+static PFN_vkCreateQueryPool							qvkCreateQueryPool;
 static PFN_vkCreateRenderPass							qvkCreateRenderPass;
 static PFN_vkCreateSampler								qvkCreateSampler;
 static PFN_vkCreateSemaphore							qvkCreateSemaphore;
@@ -116,6 +119,7 @@ static PFN_vkDestroyImageView							qvkDestroyImageView;
 static PFN_vkDestroyPipeline							qvkDestroyPipeline;
 static PFN_vkDestroyPipelineCache						qvkDestroyPipelineCache;
 static PFN_vkDestroyPipelineLayout						qvkDestroyPipelineLayout;
+static PFN_vkDestroyQueryPool							qvkDestroyQueryPool;
 static PFN_vkDestroyRenderPass							qvkDestroyRenderPass;
 static PFN_vkDestroySampler								qvkDestroySampler;
 static PFN_vkDestroySemaphore							qvkDestroySemaphore;
@@ -131,6 +135,7 @@ static PFN_vkGetDeviceQueue								qvkGetDeviceQueue;
 static PFN_vkGetFenceStatus								qvkGetFenceStatus;
 static PFN_vkGetImageMemoryRequirements					qvkGetImageMemoryRequirements;
 static PFN_vkGetImageSubresourceLayout					qvkGetImageSubresourceLayout;
+static PFN_vkGetQueryPoolResults						qvkGetQueryPoolResults;
 static PFN_vkInvalidateMappedMemoryRanges				qvkInvalidateMappedMemoryRanges;
 static PFN_vkMapMemory									qvkMapMemory;
 static PFN_vkQueueSubmit								qvkQueueSubmit;
@@ -2216,9 +2221,11 @@ static void init_vulkan_library( void )
 	INIT_DEVICE_FUNCTION(vkCmdNextSubpass)
 	INIT_DEVICE_FUNCTION(vkCmdPipelineBarrier)
 	INIT_DEVICE_FUNCTION(vkCmdPushConstants)
+	INIT_DEVICE_FUNCTION(vkCmdResetQueryPool)
 	INIT_DEVICE_FUNCTION(vkCmdSetDepthBias)
 	INIT_DEVICE_FUNCTION(vkCmdSetScissor)
 	INIT_DEVICE_FUNCTION(vkCmdSetViewport)
+	INIT_DEVICE_FUNCTION(vkCmdWriteTimestamp)
 	INIT_DEVICE_FUNCTION(vkCreateBuffer)
 	INIT_DEVICE_FUNCTION(vkCreateCommandPool)
 	INIT_DEVICE_FUNCTION(vkCreateDescriptorPool)
@@ -2230,6 +2237,7 @@ static void init_vulkan_library( void )
 	INIT_DEVICE_FUNCTION(vkCreateImageView)
 	INIT_DEVICE_FUNCTION(vkCreatePipelineCache)
 	INIT_DEVICE_FUNCTION(vkCreatePipelineLayout)
+	INIT_DEVICE_FUNCTION(vkCreateQueryPool)
 	INIT_DEVICE_FUNCTION(vkCreateRenderPass)
 	INIT_DEVICE_FUNCTION(vkCreateSampler)
 	INIT_DEVICE_FUNCTION(vkCreateSemaphore)
@@ -2246,6 +2254,7 @@ static void init_vulkan_library( void )
 	INIT_DEVICE_FUNCTION(vkDestroyPipeline)
 	INIT_DEVICE_FUNCTION(vkDestroyPipelineCache)
 	INIT_DEVICE_FUNCTION(vkDestroyPipelineLayout)
+	INIT_DEVICE_FUNCTION(vkDestroyQueryPool)
 	INIT_DEVICE_FUNCTION(vkDestroyRenderPass)
 	INIT_DEVICE_FUNCTION(vkDestroySampler)
 	INIT_DEVICE_FUNCTION(vkDestroySemaphore)
@@ -2260,6 +2269,7 @@ static void init_vulkan_library( void )
 	INIT_DEVICE_FUNCTION(vkGetDeviceQueue)
 	INIT_DEVICE_FUNCTION(vkGetFenceStatus)
 	INIT_DEVICE_FUNCTION(vkGetImageMemoryRequirements)
+	INIT_DEVICE_FUNCTION(vkGetQueryPoolResults)
 	INIT_DEVICE_FUNCTION(vkGetImageSubresourceLayout)
 	INIT_DEVICE_FUNCTION(vkInvalidateMappedMemoryRanges)
 	INIT_DEVICE_FUNCTION(vkMapMemory)
@@ -2391,9 +2401,11 @@ static void deinit_device_functions( void )
 	qvkCmdNextSubpass							= NULL;
 	qvkCmdPipelineBarrier						= NULL;
 	qvkCmdPushConstants							= NULL;
+	qvkCmdResetQueryPool						= NULL;
 	qvkCmdSetDepthBias							= NULL;
 	qvkCmdSetScissor							= NULL;
 	qvkCmdSetViewport							= NULL;
+	qvkCmdWriteTimestamp						= NULL;
 	qvkCreateBuffer								= NULL;
 	qvkCreateCommandPool						= NULL;
 	qvkCreateDescriptorPool						= NULL;
@@ -2405,6 +2417,7 @@ static void deinit_device_functions( void )
 	qvkCreateImageView							= NULL;
 	qvkCreatePipelineCache						= NULL;
 	qvkCreatePipelineLayout						= NULL;
+	qvkCreateQueryPool							= NULL;
 	qvkCreateRenderPass							= NULL;
 	qvkCreateSampler							= NULL;
 	qvkCreateSemaphore							= NULL;
@@ -2421,6 +2434,7 @@ static void deinit_device_functions( void )
 	qvkDestroyPipeline							= NULL;
 	qvkDestroyPipelineCache						= NULL;
 	qvkDestroyPipelineLayout					= NULL;
+	qvkDestroyQueryPool							= NULL;
 	qvkDestroyRenderPass						= NULL;
 	qvkDestroySampler							= NULL;
 	qvkDestroySemaphore							= NULL;
@@ -2432,6 +2446,7 @@ static void deinit_device_functions( void )
 	qvkFreeDescriptorSets						= NULL;
 	qvkFreeMemory								= NULL;
 	qvkGetBufferMemoryRequirements				= NULL;
+	qvkGetQueryPoolResults						= NULL;
 	qvkGetDeviceQueue							= NULL;
 	qvkGetFenceStatus							= NULL;
 	qvkGetImageMemoryRequirements				= NULL;
@@ -4076,6 +4091,24 @@ static void vk_create_sync_primitives( void ) {
 	// Rendering complete semaphore: signaled by vk_end_frame, waited by desktop blit
 	VK_CHECK( qvkCreateSemaphore( vk.device, &desc, NULL, &vk.renderingCompleteSem ) );
 	SET_OBJECT_NAME( vk.renderingCompleteSem, "rendering complete semaphore", VK_DEBUG_REPORT_OBJECT_TYPE_SEMAPHORE_EXT );
+
+	// GPU frame time: a timestamp pair per frame slot (r_gpuTimeLog)
+	vk.gpuTimePool = VK_NULL_HANDLE;
+	vk.gpuTime.count = 0;
+	if ( vk.timestampPeriod > 0.0f ) {
+		VkQueryPoolCreateInfo query_desc;
+
+		Com_Memset( &query_desc, 0, sizeof( query_desc ) );
+		query_desc.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+		query_desc.queryType = VK_QUERY_TYPE_TIMESTAMP;
+		query_desc.queryCount = NUM_COMMAND_BUFFERS * 2;
+		VK_CHECK( qvkCreateQueryPool( vk.device, &query_desc, NULL, &vk.gpuTimePool ) );
+		SET_OBJECT_NAME( vk.gpuTimePool, "gpu time query pool", VK_DEBUG_REPORT_OBJECT_TYPE_QUERY_POOL_EXT );
+	}
+	for ( i = 0; i < NUM_COMMAND_BUFFERS; i++ ) {
+		vk.tess[i].gpu_time_armed = qfalse;
+		vk.tess[i].gpu_time_pending = qfalse;
+	}
 }
 
 
@@ -4121,6 +4154,10 @@ static void vk_destroy_sync_primitives( void  ) {
 	if ( vk.renderingCompleteSem != VK_NULL_HANDLE ) {
 		qvkDestroySemaphore( vk.device, vk.renderingCompleteSem, NULL );
 		vk.renderingCompleteSem = VK_NULL_HANDLE;
+	}
+	if ( vk.gpuTimePool != VK_NULL_HANDLE ) {
+		qvkDestroyQueryPool( vk.device, vk.gpuTimePool, NULL );
+		vk.gpuTimePool = VK_NULL_HANDLE;
 	}
 	// Command buffer is freed when command pool is destroyed, no explicit free needed
 	vk.desktopBlitCmd = VK_NULL_HANDLE;
@@ -4258,6 +4295,9 @@ void vk_initialize( void )
 
 	vk.maxAnisotropy = props.limits.maxSamplerAnisotropy;
 	ri.Printf( PRINT_ALL, "...max anisotropy: %.0f\n", vk.maxAnisotropy );
+
+	// r_gpuTimeLog: ticks to nanoseconds, zero where the graphics queue cannot timestamp
+	vk.timestampPeriod = props.limits.timestampComputeAndGraphics ? props.limits.timestampPeriod : 0.0f;
 
 	vk.blitFilter = GL_NEAREST;
 	vk.windowAdjusted = qfalse;
@@ -8304,6 +8344,7 @@ static void vk_resize_geometry_buffer( void )
 	// vk_begin_frame would route it into vk_finish_frame and end/submit a
 	// never-begun command buffer
 	vk.recordingCommands = qfalse;
+	vk.cmd->gpu_time_armed = qfalse;
 
 	vk_wait_idle();
 
@@ -8331,6 +8372,89 @@ XR swapchain images are owned by OpenXR, not Vulkan.
 
 ==============================================================================
 */
+
+static int vk_gpu_time_compare( const void *a, const void *b )
+{
+	const float fa = *(const float *)a, fb = *(const float *)b;
+	return ( fa > fb ) - ( fa < fb );
+}
+
+
+/*
+==================
+vk_gpu_time_collect
+
+This slot's pair from its last frame, readable now that its fence was waited
+on, into the r_gpuTimeLog window; one report per window. The desktop mirror
+blit is a separate submission and is not in the span.
+==================
+*/
+static void vk_gpu_time_collect( void )
+{
+	uint64_t results[4];  // start, its availability, end, its availability
+	const uint32_t first = vk.cmd_index * 2;
+	int window;
+
+	if ( !vk.cmd->gpu_time_pending ) {
+		return;
+	}
+	vk.cmd->gpu_time_pending = qfalse;
+
+	if ( qvkGetQueryPoolResults( vk.device, vk.gpuTimePool, first, 2, sizeof( results ), results,
+			2 * sizeof( uint64_t ), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT ) != VK_SUCCESS ) {
+		return;
+	}
+	if ( !results[1] || !results[3] || results[2] < results[0] ) {
+		return;
+	}
+
+	window = r_gpuTimeLog->integer;
+	if ( window <= 0 ) {
+		vk.gpuTime.count = 0;
+		return;
+	}
+	if ( window > ARRAY_LEN( vk.gpuTime.ms ) ) {
+		window = ARRAY_LEN( vk.gpuTime.ms );
+	}
+
+	vk.gpuTime.ms[vk.gpuTime.count++] = (float)( (double)( results[2] - results[0] ) * vk.timestampPeriod * 1e-6 );
+	if ( vk.gpuTime.count < window ) {
+		return;
+	}
+
+	qsort( vk.gpuTime.ms, vk.gpuTime.count, sizeof( float ), vk_gpu_time_compare );
+	ri.Printf( PRINT_ALL, "GPU frame time over %i frames: median %.2f ms, p95 %.2f ms, max %.2f ms\n",
+		vk.gpuTime.count, vk.gpuTime.ms[vk.gpuTime.count / 2], vk.gpuTime.ms[( vk.gpuTime.count * 95 ) / 100],
+		vk.gpuTime.ms[vk.gpuTime.count - 1] );
+	vk.gpuTime.count = 0;
+}
+
+
+// Top of the slot's command buffer: the frame's first timestamp
+static void vk_gpu_time_begin( void )
+{
+	const uint32_t first = vk.cmd_index * 2;
+
+	if ( vk.gpuTimePool == VK_NULL_HANDLE || r_gpuTimeLog->integer <= 0 ) {
+		return;
+	}
+	qvkCmdResetQueryPool( vk.cmd->command_buffer, vk.gpuTimePool, first, 2 );
+	qvkCmdWriteTimestamp( vk.cmd->command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, vk.gpuTimePool, first );
+	vk.cmd->gpu_time_armed = qtrue;
+}
+
+
+// Bottom of the frame's command buffer, before it ends and submits
+static void vk_gpu_time_end( void )
+{
+	if ( !vk.cmd->gpu_time_armed ) {
+		return;
+	}
+	qvkCmdWriteTimestamp( vk.cmd->command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, vk.gpuTimePool, vk.cmd_index * 2 + 1 );
+	vk.cmd->gpu_time_armed = qfalse;
+	vk.cmd->gpu_time_pending = qtrue;
+}
+
 
 void vk_begin_frame( uint32_t colorIndex )
 {
@@ -8382,6 +8506,8 @@ void vk_begin_frame( uint32_t colorIndex )
 		vk.cmd->waitForFence = qfalse;
 	}
 
+	vk_gpu_time_collect();
+
 	// Validate XR resources are initialized BEFORE accessing arrays
 	if ( !vk.xr.initialized || !vk.xr.colorInfo ) {
 		ri.Printf( PRINT_WARNING, "vk_begin_frame: XR resources not initialized (init=%d, colorInfo=%p)\n",
@@ -8418,6 +8544,8 @@ void vk_begin_frame( uint32_t colorIndex )
 
 	VK_CHECK( qvkBeginCommandBuffer( vk.cmd->command_buffer, &begin_info ) );
 	vk.recordingCommands = qtrue;
+
+	vk_gpu_time_begin();
 
 	// Batch FBO layout transitions into a single pipeline barrier
 	{
@@ -8612,6 +8740,8 @@ void vk_end_frame( void )
 		return;
 	}
 
+	vk_gpu_time_end();
+
 	VK_CHECK( qvkEndCommandBuffer( vk.cmd->command_buffer ) );
 	vk.recordingCommands = qfalse;
 
@@ -8678,6 +8808,8 @@ void vk_finish_frame( void )
 	VkSubmitInfo submit_info;
 
 	if ( vk_end_interrupted_pass() ) {
+		vk_gpu_time_end();
+
 		VK_CHECK( qvkEndCommandBuffer( vk.cmd->command_buffer ) );
 		vk.recordingCommands = qfalse;
 
@@ -8719,6 +8851,8 @@ void vk_discard_frame( void )
 		VK_CHECK( qvkEndCommandBuffer( vk.cmd->command_buffer ) );
 		vk.recordingCommands = qfalse;
 	}
+	// never submitted, so there is nothing to read back
+	vk.cmd->gpu_time_armed = qfalse;
 
 	// Do not touch vk.cmd->waitForFence: it may still track this slot's
 	// previous real submission, which vk_begin_frame must still wait on.
