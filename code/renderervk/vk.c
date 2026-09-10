@@ -560,7 +560,9 @@ static void vk_create_swapchain( VkPhysicalDevice physical_device, VkDevice devi
 	vk.desktopHeight = image_extent.height;
 
 	vk.clearAttachment = qtrue;
-	// Note: fboActive is always true in VR, so no need to check swapchain usage flags here
+	// Quake3e tests this swapchain's usage flags when the scene renders into it.
+	// Here it is only the desktop mirror: even in direct mode the scene goes to
+	// the XR swapchain, so \r_clear never depends on what this surface supports.
 
 	// determine present mode and swapchain image count
 	VK_CHECK(qvkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &present_mode_count, NULL));
@@ -911,8 +913,9 @@ static void vk_create_main_render_pass( const char *why )
 
 	Com_Memset( attachments, 0, sizeof( attachments ) );
 
-	// Attachment 0: Color resolve target
-	attachments[0].format = vk.color_format;
+	// Attachment 0: the resolve target under MSAA, the render target otherwise.
+	// In direct mode this is the swapchain image and the frame ends here.
+	attachments[0].format = vk.mainColorFormat;
 	attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
 	if ( vk.msaaActive ) {
 		attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; // Written by resolve
@@ -927,16 +930,19 @@ static void vk_create_main_render_pass( const char *why )
 	attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 	attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	// The gamma pass leaves the swapchain in this layout under FBO, and the
+	// runtime expects it either way, so both modes end the same
 	attachments[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
 	// Attachment 1: Depth
 	attachments[1].format = vk.depth_format;
 	attachments[1].samples = vk.msaaActive ? vkSamples : VK_SAMPLE_COUNT_1_BIT;
 	attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	// Stored only where a later pass loads these samples: with no resolve to read
-	// instead, the post pass loads them directly
-	attachments[1].storeOp = vk.depthResolveActive ?
-		VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
+	// Stored only where a later pass loads these samples: the FBO path's post
+	// pass, when there is no depth resolve for it to read instead. Direct mode
+	// has no later pass at all.
+	attachments[1].storeOp = ( vk.fboActive && !vk.depthResolveActive ) ?
+		VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
 	attachments[1].stencilLoadOp = glConfig.stencilBits ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 	attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -958,8 +964,9 @@ static void vk_create_main_render_pass( const char *why )
 
 	if ( vk.msaaActive )
 	{
-		// Attachment 2: MSAA color (render target, resolves to [0])
-		attachments[2].format = vk.color_format;
+		// Attachment 2: MSAA color (render target, resolves to [0], and a
+		// resolve requires both to declare the same format)
+		attachments[2].format = vk.mainColorFormat;
 		attachments[2].samples = vkSamples;
 #ifdef USE_BUFFER_CLEAR
 		attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
@@ -1062,8 +1069,9 @@ static void vk_create_main_render_pass( const char *why )
 		viewMask, correlationMask, deps, ARRAY_LEN( deps ),
 		vk.depthResolveActive ? &depthResolveRef : NULL );
 	SET_OBJECT_NAME( vk.render_pass.main, va( "render pass - XR main (multiview, %s)", why ), VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT );
-	ri.Printf( PRINT_ALL, "Created main render pass (%s): %p (attachments: %u, MSAA: %s)\n",
-		why, (void*)vk.render_pass.main, attachmentCount, vk.msaaActive ? "yes" : "no" );
+	ri.Printf( PRINT_ALL, "Created main render pass (%s): %p (%s, attachments: %u, MSAA: %s)\n",
+		why, (void*)vk.render_pass.main, vk.fboActive ? "FBO" : "direct",
+		attachmentCount, vk.msaaActive ? "yes" : "no" );
 }
 
 
@@ -1096,9 +1104,9 @@ static void vk_create_render_passes( void )
 	deps[2].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 	deps[2].dependencyFlags = 0;
 
-	// Screenmap render pass: only needed for FBO mode (r_fbo=1)
-	// In non-FBO mode, we skip directly to XR multiview passes
-	if ( r_fbo->integer )
+	// The screenmap renders into its own images in both modes, and
+	// vk_create_framebuffers builds its framebuffer unconditionally: a shader
+	// carrying a screen map would otherwise begin a NULL pass in direct mode
 	{
 		desc.dependencyCount = 2;
 		desc.pDependencies = &deps[0];
@@ -1837,7 +1845,8 @@ static qboolean vk_blit_enabled( VkPhysicalDevice physical_device, const VkForma
 
 static VkFormat get_hdr_format( VkFormat base_format )
 {
-	if ( r_fbo->integer == 0 ) {
+	// This is the FBO color's format, and direct mode has no FBO
+	if ( !vk.fboActive ) {
 		return base_format;
 	}
 
@@ -2085,7 +2094,9 @@ static qboolean vk_select_surface_format( VkPhysicalDevice physical_device, VkSu
 
 	get_present_format( 24, &base_bgr, &base_rgb );
 
-	if ( r_fbo->integer ) {
+	// r_presentBits picks a wider present format for the gamma pass to write;
+	// direct mode has no such pass, so the base format is all it can present
+	if ( vk.fboActive ) {
 		get_present_format( r_presentBits->integer, &ext_bgr, &ext_rgb );
 	} else {
 		ext_bgr = base_bgr;
@@ -2133,7 +2144,10 @@ static qboolean vk_select_surface_format( VkPhysicalDevice physical_device, VkSu
 			}
 		}
 
-		if ( r_hdrDisplay->integer && r_fbo->integer ) {
+		if ( r_hdrDisplay->integer && !vk.fboActive ) {
+			// The encode samples the scene and emissive images the FBO path renders into
+			ri.Printf( PRINT_ALL, "...HDR requested but the mirror encode needs the scene framebuffer, which \\r_fbo 0 does not create; using SDR\n" );
+		} else if ( r_hdrDisplay->integer ) {
 			if ( !vk.hdrColorspaceExt ) {
 				ri.Printf( PRINT_ALL, "...HDR requested but VK_EXT_swapchain_colorspace is unavailable; using SDR\n" );
 			} else {
@@ -2163,7 +2177,8 @@ static qboolean vk_select_surface_format( VkPhysicalDevice physical_device, VkSu
 
 	ri.Cvar_Set( "r_hdrActive", vk.hdrActive ? "1" : "0" );
 
-	if ( !r_fbo->integer ) {
+	// Nothing encodes into an extended present format without the gamma pass
+	if ( !vk.fboActive ) {
 		vk.present_format = vk.base_format;
 	}
 
@@ -2178,6 +2193,10 @@ static void setup_surface_formats( VkPhysicalDevice physical_device )
 	vk.depth_format = get_depth_format( physical_device );
 
 	vk.color_format = get_hdr_format( vk.base_format.format );
+
+	// Direct mode overwrites this in vk_recreate_xr_render_pass once the XR
+	// swapchain format is known; until then the FBO format is the only one there is
+	vk.mainColorFormat = vk.color_format;
 
 	vk.capture_format = VK_FORMAT_R8G8B8A8_UNORM;
 
@@ -2261,6 +2280,9 @@ static void init_vulkan_library( void )
 
 	// Set up from XR-provided objects
 	vk.xrMode = qtrue;
+	// Set before the surface format code below reads it; vk_initialize's own
+	// setup runs after this function and would be too late
+	vk.fboActive = r_fbo->integer ? qtrue : qfalse;
 	vk.xrInstance = xrDevice->instance;
 	vk.physical_device = xrDevice->physicalDevice;
 	vk.device = xrDevice->device;
@@ -2973,6 +2995,60 @@ void vk_init_descriptors( void )
 		VK_CHECK( qvkAllocateDescriptorSets( vk.device, &alloc, &vk.screenMap.color_descriptor ) ); // screenmap
 
 		vk_update_attachment_descriptors();
+	}
+	else if ( vk.screenMap.color_image_view )
+	{
+		// Direct mode has no scene framebuffer, so the two sets the desktop mirror
+		// binds at 1 and 2 have no image of their own. desktopmirror.frag declares
+		// both samplers, which makes them statically used and so requires real
+		// handles on every draw, even though only its HDR reconstruction reads them
+		// and HDR cannot be active without the FBO. The screen map's color stands
+		// in: it exists in both modes, it is the two-layer array the shader's
+		// sampler2DArray expects, and in direct mode it never leaves
+		// SHADER_READ_ONLY_OPTIMAL, because no shader is given a screen map without
+		// the FBO and its pass therefore never runs.
+		VkDescriptorImageInfo placeholder;
+
+		alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		alloc.pNext = NULL;
+		alloc.descriptorPool = vk.descriptor_pool;
+		alloc.descriptorSetCount = 1;
+		alloc.pSetLayouts = &vk.set_layout_sampler;
+
+		VK_CHECK( qvkAllocateDescriptorSets( vk.device, &alloc, &vk.color_descriptor ) );
+		VK_CHECK( qvkAllocateDescriptorSets( vk.device, &alloc, &vk.emissive_descriptor ) );
+
+		// The shared sampler, not one from vk.samplers[]: GL_TextureMode destroys
+		// that whole pool mid-session and rewrites the descriptors that drew from
+		// it through vk_update_attachment_descriptors(), whose body only runs when
+		// there is an FBO color. These two sets would keep the destroyed handle.
+		placeholder.sampler = vk.linearSampler;
+		placeholder.imageView = vk.screenMap.color_image_view;
+		placeholder.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+		desc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		desc.pNext = NULL;
+		desc.dstBinding = 0;
+		desc.dstArrayElement = 0;
+		desc.descriptorCount = 1;
+		desc.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		desc.pImageInfo = &placeholder;
+		desc.pBufferInfo = NULL;
+		desc.pTexelBufferView = NULL;
+
+		desc.dstSet = vk.color_descriptor;
+		qvkUpdateDescriptorSets( vk.device, 1, &desc, 0, NULL );
+
+		desc.dstSet = vk.emissive_descriptor;
+		qvkUpdateDescriptorSets( vk.device, 1, &desc, 0, NULL );
+	}
+	else
+	{
+		// Unreachable: the screen map's images are created outside the mode gate,
+		// in vk_initialize, which runs before this. Said out loud anyway, because
+		// falling through here leaves the mirror binding two null sets and that is
+		// the one failure the arm above exists to prevent.
+		ri.Printf( PRINT_WARNING, "vk_init_descriptors: nothing to stand in for the desktop mirror's scene and emissive sets\n" );
 	}
 
 	vk.descriptorsReady = qtrue;
@@ -3975,8 +4051,9 @@ static void vk_create_attachments( void )
 	{
 		VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 
-		// bloom images (multiview-compatible 2-layer arrays)
-		if ( r_bloom->integer ) {
+		// bloom images (multiview-compatible 2-layer arrays). Bloom samples the
+		// FBO color and blends the result back in a pass direct mode does not have
+		if ( r_bloom->integer && vk.fboActive ) {
 			uint32_t width = gls.captureWidth;
 			uint32_t height = gls.captureHeight;
 
@@ -3994,10 +4071,16 @@ static void vk_create_attachments( void )
 			}
 		}
 
-		// post-processing/msaa-resolve (multiview-compatible 2-layer array)
-		create_color_attachment( glConfig.vidWidth, glConfig.vidHeight, VK_SAMPLE_COUNT_1_BIT, vk.color_format,
-			usage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &vk.color_image, &vk.color_image_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, qfalse );
+		// post-processing/msaa-resolve (multiview-compatible 2-layer array).
+		// Direct mode renders into the swapchain image and has nothing to resolve
+		// into an offscreen color, nor a later pass to sample one
+		if ( vk.fboActive ) {
+			create_color_attachment( glConfig.vidWidth, glConfig.vidHeight, VK_SAMPLE_COUNT_1_BIT, vk.color_format,
+				usage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &vk.color_image, &vk.color_image_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, qfalse );
+		}
 
+		// vk.hdrActive is false in direct mode: the HDR mirror encode samples the
+		// FBO, so vk_select_surface_format refuses HDR without it
 		if ( vk.hdrActive ) {
 			// resolved 2-layer multiview emissive layer, sampled by the gamma/mirror pass
 			create_color_attachment( glConfig.vidWidth, glConfig.vidHeight, VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R16G16B16A16_SFLOAT,
@@ -4023,8 +4106,10 @@ static void vk_create_attachments( void )
 		// screenmap depth
 		create_depth_attachment( vk.screenMapWidth, vk.screenMapHeight, vk.screenMapSamples, &vk.screenMap.depth_image, &vk.screenMap.depth_image_view, qtrue );
 
-		// MSAA color attachment (multiview-compatible 2-layer array)
-		if ( vk.msaaActive ) {
+		// MSAA color attachment (multiview-compatible 2-layer array). This is the
+		// FBO's multisampled color; direct mode holds its samples in the transient
+		// image below and resolves them into the swapchain
+		if ( vk.fboActive && vk.msaaActive ) {
 			create_color_attachment( glConfig.vidWidth, glConfig.vidHeight, vkSamples, vk.color_format,
 				VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &vk.msaa_image, &vk.msaa_image_view, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, qtrue );
 		}
@@ -4033,8 +4118,12 @@ static void vk_create_attachments( void )
 
 	//vk_alloc_attachments();
 
-	create_depth_attachment( glConfig.vidWidth, glConfig.vidHeight, vkSamples, &vk.depth_image, &vk.depth_image_view,
-		r_bloom->integer ? qfalse : qtrue );
+	// The FBO's depth. Direct mode binds the XR native depth buffer without MSAA
+	// and the transient depth below with it, so nothing there reads this one
+	if ( vk.fboActive ) {
+		create_depth_attachment( glConfig.vidWidth, glConfig.vidHeight, vkSamples, &vk.depth_image, &vk.depth_image_view,
+			r_bloom->integer ? qfalse : qtrue );
+	}
 
 	if ( vk.depthResolveActive ) {
 		// The main pass resolves into this and the post pass loads it, so it
@@ -4042,6 +4131,10 @@ static void vk_create_attachments( void )
 		create_depth_attachment( glConfig.vidWidth, glConfig.vidHeight, VK_SAMPLE_COUNT_1_BIT,
 			&vk.depth_resolve_image, &vk.depth_resolve_image_view, qfalse );
 	}
+
+	// Direct mode's transient pair is deliberately absent from this pool:
+	// vk_create_direct_transient_images() builds it from vk_init_xr_resources,
+	// once the XR swapchain format its color must match is known
 
 	vk_alloc_attachments();
 
@@ -4067,6 +4160,160 @@ static void vk_create_attachments( void )
 		SET_OBJECT_NAME( vk.bloom_image[i], va( "bloom attachment %i", i ), VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT );
 		SET_OBJECT_NAME( vk.bloom_image_view[i], va( "bloom attachment %i", i ), VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_VIEW_EXT );
 	}
+}
+
+
+/*
+==================
+vk_destroy_direct_transient_images
+==================
+*/
+static void vk_destroy_direct_transient_images( void )
+{
+	if ( vk.transient_color_image != VK_NULL_HANDLE ) {
+		qvkDestroyImageView( vk.device, vk.transient_color_image_view, NULL );
+		qvkDestroyImage( vk.device, vk.transient_color_image, NULL );
+		vk.transient_color_image_view = VK_NULL_HANDLE;
+		vk.transient_color_image = VK_NULL_HANDLE;
+	}
+	if ( vk.transient_color_memory != VK_NULL_HANDLE ) {
+		qvkFreeMemory( vk.device, vk.transient_color_memory, NULL );
+		vk.transient_color_memory = VK_NULL_HANDLE;
+	}
+
+	if ( vk.transient_depth_image != VK_NULL_HANDLE ) {
+		qvkDestroyImageView( vk.device, vk.transient_depth_image_view, NULL );
+		qvkDestroyImage( vk.device, vk.transient_depth_image, NULL );
+		vk.transient_depth_image_view = VK_NULL_HANDLE;
+		vk.transient_depth_image = VK_NULL_HANDLE;
+	}
+	if ( vk.transient_depth_memory != VK_NULL_HANDLE ) {
+		qvkFreeMemory( vk.device, vk.transient_depth_memory, NULL );
+		vk.transient_depth_memory = VK_NULL_HANDLE;
+	}
+}
+
+
+/*
+==================
+vk_create_direct_transient_images
+
+Direct mode's multisampled color and depth: the scene draws into these and the
+main pass's store resolves color into the swapchain image, so nothing reads
+either afterwards.
+
+They own their memory rather than taking a slice of the batched attachment pool,
+because that pool is packed inside vk_initialize and the color's format is the XR
+swapchain's, which vk_recreate_xr_render_pass does not settle into
+vk.mainColorFormat until the session hands the swapchains over. Called from
+vk_init_xr_resources between those two points, and destroying first so a
+vid_restart or a swapchain rebuild cannot leave a stale pair behind.
+==================
+*/
+static void vk_create_direct_transient_images( void )
+{
+	VkImageCreateInfo imageInfo;
+	VkImageViewCreateInfo viewInfo;
+	VkMemoryRequirements memReqs;
+	VkMemoryAllocateInfo allocInfo;
+	uint32_t memoryType;
+
+	vk_destroy_direct_transient_images();
+
+	if ( vk.fboActive || !vk.msaaActive ) {
+		return;
+	}
+
+	if ( vk.xr.width == 0 || vk.xr.height == 0 ) {
+		ri.Printf( PRINT_WARNING, "vk_create_direct_transient_images: XR resolution not set\n" );
+		return;
+	}
+
+	Com_Memset( &imageInfo, 0, sizeof( imageInfo ) );
+	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	imageInfo.imageType = VK_IMAGE_TYPE_2D;
+	// The extent vk_create_xr_framebuffers() builds the direct framebuffers at,
+	// so the pair is never smaller than the framebuffer that binds it
+	imageInfo.extent.width = vk.xr.width;
+	imageInfo.extent.height = vk.xr.height;
+	imageInfo.extent.depth = 1;
+	imageInfo.mipLevels = 1;
+	imageInfo.arrayLayers = 2;  // Stereo multiview
+	imageInfo.samples = vkSamples;
+	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	Com_Memset( &viewInfo, 0, sizeof( viewInfo ) );
+	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;  // Multiview stereo
+	viewInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+	viewInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+	viewInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+	viewInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+	viewInfo.subresourceRange.baseMipLevel = 0;
+	viewInfo.subresourceRange.levelCount = 1;
+	viewInfo.subresourceRange.baseArrayLayer = 0;
+	viewInfo.subresourceRange.layerCount = 2;  // Stereo (left + right)
+
+	Com_Memset( &allocInfo, 0, sizeof( allocInfo ) );
+	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+
+	// Multisampled color, resolved into the swapchain image by the store
+	imageInfo.format = vk.mainColorFormat;
+	imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
+	VK_CHECK( qvkCreateImage( vk.device, &imageInfo, NULL, &vk.transient_color_image ) );
+
+	qvkGetImageMemoryRequirements( vk.device, vk.transient_color_image, &memReqs );
+	// Lazily allocated memory never leaves tile storage where a driver offers it;
+	// desktop drivers do not, so device local is the fallback
+	memoryType = find_memory_type2( memReqs.memoryTypeBits,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT, NULL );
+	if ( memoryType == ~0U ) {
+		memoryType = find_memory_type( memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT );
+	}
+	allocInfo.allocationSize = memReqs.size;
+	allocInfo.memoryTypeIndex = memoryType;
+	VK_CHECK( qvkAllocateMemory( vk.device, &allocInfo, NULL, &vk.transient_color_memory ) );
+	VK_CHECK( qvkBindImageMemory( vk.device, vk.transient_color_image, vk.transient_color_memory, 0 ) );
+
+	viewInfo.image = vk.transient_color_image;
+	viewInfo.format = vk.mainColorFormat;
+	viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	VK_CHECK( qvkCreateImageView( vk.device, &viewInfo, NULL, &vk.transient_color_image_view ) );
+
+	SET_OBJECT_NAME( vk.transient_color_image, "direct mode transient color", VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT );
+	SET_OBJECT_NAME( vk.transient_color_image_view, "direct mode transient color", VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_VIEW_EXT );
+
+	// Multisampled depth, discarded when the pass ends
+	imageInfo.format = vk.depth_format;
+	imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
+	VK_CHECK( qvkCreateImage( vk.device, &imageInfo, NULL, &vk.transient_depth_image ) );
+
+	qvkGetImageMemoryRequirements( vk.device, vk.transient_depth_image, &memReqs );
+	memoryType = find_memory_type2( memReqs.memoryTypeBits,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT, NULL );
+	if ( memoryType == ~0U ) {
+		memoryType = find_memory_type( memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT );
+	}
+	allocInfo.allocationSize = memReqs.size;
+	allocInfo.memoryTypeIndex = memoryType;
+	VK_CHECK( qvkAllocateMemory( vk.device, &allocInfo, NULL, &vk.transient_depth_memory ) );
+	VK_CHECK( qvkBindImageMemory( vk.device, vk.transient_depth_image, vk.transient_depth_memory, 0 ) );
+
+	viewInfo.image = vk.transient_depth_image;
+	viewInfo.format = vk.depth_format;
+	viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	if ( glConfig.stencilBits > 0 ) {
+		viewInfo.subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+	}
+	VK_CHECK( qvkCreateImageView( vk.device, &viewInfo, NULL, &vk.transient_depth_image_view ) );
+
+	SET_OBJECT_NAME( vk.transient_depth_image, "direct mode transient depth", VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT );
+	SET_OBJECT_NAME( vk.transient_depth_image_view, "direct mode transient depth", VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_VIEW_EXT );
+
+	ri.Printf( PRINT_ALL, "...direct mode transient images created (%ux%u, %ix MSAA)\n",
+		vk.xr.width, vk.xr.height, vkSamples );
 }
 
 
@@ -4167,7 +4414,7 @@ static void vk_create_framebuffers( void )
 	desc.pAttachments = attachments;
 	desc.layers = 1;  // Multiview handles stereo layers via view mask
 
-	if ( r_fbo->integer )
+	if ( vk.fboActive )
 	{
 		// One main and one post-bloom framebuffer, shared by every swapchain index.
 		// Gamma framebuffers output to XR swapchain UNORM views and are created
@@ -4193,7 +4440,9 @@ static void vk_create_framebuffers( void )
 		VK_CHECK( qvkCreateFramebuffer( vk.device, &desc, NULL, &vk.framebuffers.screenmap ) );
 		SET_OBJECT_NAME( vk.framebuffers.screenmap, "framebuffer - screenmap", VK_DEBUG_REPORT_OBJECT_TYPE_FRAMEBUFFER_EXT );
 
-		if ( r_bloom->integer )
+		// Same test the bloom images are created under: direct mode has none for
+		// these framebuffers to bind
+		if ( r_bloom->integer && vk.fboActive )
 		{
 			uint32_t width = gls.captureWidth;
 			uint32_t height = gls.captureHeight;
@@ -4528,8 +4777,8 @@ void vk_initialize( void )
 
 	vk_set_render_scale();
 
-	// FBO is always active in VR for post-processing (r_fbo clamped to 1)
-	vk.fboActive = qtrue;
+	// vk.fboActive was set in init_vulkan_library(), early enough for the
+	// surface format code to read it
 	if ( r_ext_multisample->integer ) {
 		vk.msaaActive = qtrue;
 	}
@@ -4557,8 +4806,10 @@ void vk_initialize( void )
 	// wherever MSAA does: a pass declaring single-sample color and multisampled
 	// depth is invalid, and its framebuffer has nothing else to bind. The test is
 	// the realized sample count, not vk.msaaActive, which is decided from the
-	// cvar before the clamp above and can survive it at one sample.
-	vk.depthResolveActive = ( vk.msaaActive && vkSamples > VK_SAMPLE_COUNT_1_BIT ) ? qtrue : qfalse;
+	// cvar before the clamp above and can survive it at one sample. That post
+	// pass is the only thing that reads a resolved depth, and direct mode has no
+	// pass after the scene at all, so the mode gates it too.
+	vk.depthResolveActive = ( vk.fboActive && vk.msaaActive && vkSamples > VK_SAMPLE_COUNT_1_BIT ) ? qtrue : qfalse;
 
 	vk.screenMapSamples = MIN( vkMaxSamples, VK_SAMPLE_COUNT_4_BIT );
 
@@ -5096,6 +5347,11 @@ static void vk_destroy_attachments( void )
 		vk.depth_resolve_image_view = VK_NULL_HANDLE;
 	}
 
+	// Owns its own memory, so it frees itself rather than following the pool.
+	// vk_shutdown_xr_resources() gets there first in the normal order; this is
+	// the backstop for a teardown that never brought XR resources up.
+	vk_destroy_direct_transient_images();
+
 	if ( vk.screenMap.color_image ) {
 		qvkDestroyImage( vk.device, vk.screenMap.color_image, NULL );
 		qvkDestroyImageView( vk.device, vk.screenMap.color_image_view, NULL );
@@ -5467,6 +5723,9 @@ void vk_release_resources( void ) {
 	// rather than a freed handle.
 	vk.descriptorsReady = qfalse;
 	vk.storage.descriptor = VK_NULL_HANDLE;
+	// vk_reallocate_xr_fbo_descriptors() restores this one only where there is an
+	// FBO color to point it at, so direct mode needs it NULLed like the rest
+	vk.color_descriptor = VK_NULL_HANDLE;
 	vk.emissive_descriptor = VK_NULL_HANDLE;
 	vk.screenMap.color_descriptor = VK_NULL_HANDLE;
 	for ( i = 0; i < NUM_COMMAND_BUFFERS; i++ ) {
@@ -5866,7 +6125,8 @@ static qboolean vk_surface_format_color_depth( VkFormat format, int *r, int *g, 
  * vk_create_post_process_pipelines - Create post-processing pipelines for multiview
  *
  * Creates gamma, bloom extract, blur, and blend pipelines using multiview render passes.
- * Called when r_fbo is active.
+ * Called in both modes; direct mode runs none of these passes and leaves the
+ * pipelines unused rather than tracking which of them a later mode change wants.
  */
 void vk_create_post_process_pipelines( void )
 {
@@ -8301,8 +8561,18 @@ void vk_begin_main_render_pass( void )
 		return;
 	}
 
-	// Q3VR is XR-only: use FBO framebuffer (fboActive always true in VR)
-	frameBuffer = vk.framebuffers.main;
+	// Direct mode renders into the swapchain image the runtime just handed us;
+	// the FBO path renders into its own and resolves to the swapchain later
+	if ( vk.fboActive ) {
+		frameBuffer = vk.framebuffers.main;
+	} else {
+		frameBuffer = vk.xr.directFramebuffers[vk.xr.colorIndex];
+	}
+
+	if ( frameBuffer == VK_NULL_HANDLE ) {
+		ri.Printf( PRINT_WARNING, "vk_begin_main_render_pass: framebuffer not ready\n" );
+		return;
+	}
 
 	renderPass = vk.render_pass.main;
 
@@ -8314,8 +8584,8 @@ void vk_begin_main_render_pass( void )
 
 	vk.renderPassIndex = RENDER_PASS_MAIN;
 
-	// Use FBO dimensions (fboActive always true in VR)
-	// Note: glConfig.vidWidth/Height = vk.xr.width/height in VR
+	// One extent serves both modes: the FBO is created at glConfig.vidWidth/Height
+	// and, in VR, those are vk.xr.width/height, the swapchain image's own size
 	vk.renderWidth = glConfig.vidWidth;
 	vk.renderHeight = glConfig.vidHeight;
 
@@ -9006,11 +9276,11 @@ void vk_begin_frame( uint32_t colorIndex )
 	// Store current XR swapchain index (after validation)
 	vk.xr.colorIndex = colorIndex;
 
-	// Validate framebuffer exists based on rendering mode
-	// When FBO is active: use vk.framebuffers.main for main rendering
-	// When FBO is NOT active: use xr->framebuffers[] (direct to XR swapchain)
-	if ( vk.framebuffers.main == VK_NULL_HANDLE ) {
-		ri.Printf( PRINT_WARNING, "vk_begin_frame: main framebuffer is NULL\n" );
+	// The main pass renders into the FBO's framebuffer or, in direct mode, into
+	// one of the swapchain image's own; only the active mode's must exist
+	if ( ( vk.fboActive ? vk.framebuffers.main : vk.xr.directFramebuffers[colorIndex] ) == VK_NULL_HANDLE ) {
+		ri.Printf( PRINT_WARNING, "vk_begin_frame: %s framebuffer is NULL\n",
+			vk.fboActive ? "main" : "direct-mode" );
 		vk.frame_count = 0;
 		return;
 	}
@@ -9170,8 +9440,10 @@ void vk_end_frame( void )
 		useVirtualScreen = ri.VR_GetVirtualScreenState( vsEyeProj, screenMV, floorMV );
 	}
 
-	// Post-processing for XR (bloom, gamma): fboActive always true in VR
-	if ( vk.xr.initialized && vk.color_image != VK_NULL_HANDLE ) {
+	// The FBO path's post chain. Direct mode drew into the swapchain image
+	// itself, so there is nothing to blend, sample or encode: the pass below
+	// simply ends and the frame is done.
+	if ( vk.fboActive && vk.xr.initialized && vk.color_image != VK_NULL_HANDLE ) {
 		vk.cmd->last_pipeline = VK_NULL_HANDLE; // do not restore clobbered descriptors in vk_bloom()
 
 		// Apply bloom if enabled
@@ -9214,6 +9486,21 @@ void vk_end_frame( void )
 		qvkCmdDraw( vk.cmd->command_buffer, 4, 1, 0, 0 );
 		vk_end_render_pass();
 		vk_gpu_time_stamp( GPU_TIME_GAMMA );
+
+		if ( useVirtualScreen ) {
+			vk_render_virtual_screen( vsEyeProj, screenMV, floorMV );
+		}
+	}
+	else if ( !vk.fboActive && vk.xr.initialized ) {
+		// The same fallbacks the FBO branch runs, for the same frames: one that
+		// never issued RC_FINISHBLOOM still gets its deferred corona and HUD
+		// sprite, drawn into the main pass while it is still open
+		RB_RenderDeferredFlares();
+		RB_DrawDeferredHud();
+
+		// One pass wrote the swapchain image; close it and stamp the eye buffer
+		vk_end_render_pass();
+		vk_gpu_time_stamp( GPU_TIME_EYE_END );
 
 		if ( useVirtualScreen ) {
 			vk_render_virtual_screen( vsEyeProj, screenMV, floorMV );
@@ -10871,9 +11158,16 @@ void vk_read_pixels( byte *buffer, uint32_t width, uint32_t height )
 		// dedicated capture buffer
 		srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 		srcImage = vk.capture.image;
-	} else {
+	} else if ( vk.color_image != VK_NULL_HANDLE ) {
 		srcImageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		srcImage = vk.color_image;
+	} else {
+		// Direct mode drew into the swapchain image the runtime owns, and there
+		// is no copy of the frame left to read. Black out what the caller is
+		// about to write so no uninitialized memory reaches the file.
+		ri.Printf( PRINT_WARNING, "Screenshots read the scene framebuffer; set " S_COLOR_CYAN "\\r_fbo 1" S_COLOR_WHITE " and \\vid_restart to take one\n" );
+		Com_Memset( buffer, 0, width * height * 3 );
+		return;
 	}
 
 	Com_Memset( &desc, 0, sizeof( desc ) );
@@ -11095,8 +11389,9 @@ qboolean vk_bloom( void )
 		return qfalse;
 	}
 
-	// Q3VR is VR-only: use FBO resources
-	if ( !vk.xr.initialized || vk.color_image == VK_NULL_HANDLE )
+	// Bloom is an FBO-path feature: it samples the FBO color and blends the
+	// result back into a pass direct mode does not have
+	if ( !vk.fboActive || !vk.xr.initialized || vk.color_image == VK_NULL_HANDLE )
 	{
 		return qfalse;
 	}
@@ -11313,7 +11608,13 @@ static qboolean vk_create_xr_native_depth( void )
 	viewCI.image = xr->xrDepthImage;
 	viewCI.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
 	viewCI.format = vk.depth_format;
+	// Direct mode without MSAA binds this as the main pass's depth, where the
+	// stencil is cleared on load and again by vk_clear_depth() on every view; a
+	// view that omitted the aspect its format carries would fail both
 	viewCI.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	if ( glConfig.stencilBits > 0 ) {
+		viewCI.subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+	}
 	viewCI.subresourceRange.baseMipLevel = 0;
 	viewCI.subresourceRange.levelCount = 1;
 	viewCI.subresourceRange.baseArrayLayer = 0;
@@ -11519,19 +11820,16 @@ void vk_destroy_xr_image_views( void )
 }
 
 /*
- * vk_create_xr_framebuffers - Create VkFramebuffers for XR swapchain images
+ * vk_create_xr_framebuffers - Framebuffers over the XR swapchain images
  *
- * When r_fbo is active:
- *   - Main rendering goes to xr->fboFramebuffer (created separately)
- *   - Gamma pass outputs to xr->gammaFramebuffers[] (created separately)
- *   - We don't create xr->framebuffers[] here since they're not used
+ * Two arrays, because two passes render into those images:
+ *   framebuffers[]       - the virtual screen's pass, in both modes
+ *   directFramebuffers[] - the main pass, direct mode only. With MSAA the
+ *                          swapchain image is the resolve target and the
+ *                          transient images hold the samples.
  *
- * When r_fbo is NOT active:
- *   - Main rendering goes directly to XR swapchain via xr->framebuffers[]
- *   - We create multiview framebuffers for each swapchain image
- *
- * NOTE: Per-eye framebuffers for desktop mirror are not created since
- * desktop mirror is not implemented in this VR-only application.
+ * The desktop mirror has no per-eye framebuffers here: it samples the
+ * swapchain image, or the scene FBO under HDR, through its own pass.
  */
 qboolean vk_create_xr_framebuffers( void )
 {
@@ -11562,7 +11860,8 @@ qboolean vk_create_xr_framebuffers( void )
 		return qfalse;
 	}
 
-	// Create XR swapchain framebuffers (direct render when !r_fbo, virtual screen otherwise)
+	// The virtual screen's framebuffers, built in both modes; the direct-mode
+	// ones follow in their own loop below
 	for ( i = 0; i < xr->colorInfo->imageCount && i < MAX_SWAPCHAIN_IMAGES; i++ ) {
 		// Color image views should already be created
 		if ( xr->colorViews[i] == VK_NULL_HANDLE ) {
@@ -11599,6 +11898,54 @@ qboolean vk_create_xr_framebuffers( void )
 
 	// Per-eye framebuffers for desktop mirror not implemented (VR-only app)
 
+	if ( !vk.fboActive ) {
+		VkImageView directAttachments[3]; // swapchain | depth | transient msaa color
+		uint32_t attachmentCount;
+
+		if ( vk.render_pass.main == VK_NULL_HANDLE ) {
+			ri.Printf( PRINT_WARNING, "vk_create_xr_framebuffers: main render pass not created\n" );
+			return qfalse;
+		}
+		if ( vk.msaaActive && ( vk.transient_color_image_view == VK_NULL_HANDLE ||
+			vk.transient_depth_image_view == VK_NULL_HANDLE ) ) {
+			ri.Printf( PRINT_WARNING, "vk_create_xr_framebuffers: transient MSAA images not created\n" );
+			return qfalse;
+		}
+
+		for ( i = 0; i < xr->colorInfo->imageCount && i < MAX_SWAPCHAIN_IMAGES; i++ ) {
+			// The UNORM view, as the gamma pass uses under FBO: nothing encodes
+			// sRGB on the way out in either mode
+			directAttachments[0] = ( xr->gammaViews[i] != VK_NULL_HANDLE ) ? xr->gammaViews[i] : xr->colorViews[i];
+
+			if ( vk.msaaActive ) {
+				// The swapchain image is the resolve target; the samples live here
+				directAttachments[1] = vk.transient_depth_image_view;
+				directAttachments[2] = vk.transient_color_image_view;
+				attachmentCount = 3;
+			} else {
+				directAttachments[1] = xr->xrDepthView;
+				attachmentCount = 2;
+			}
+
+			Com_Memset( &fbInfo, 0, sizeof( fbInfo ) );
+			fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+			fbInfo.renderPass = vk.render_pass.main;
+			fbInfo.attachmentCount = attachmentCount;
+			fbInfo.pAttachments = directAttachments;
+			fbInfo.width = xr->width;
+			fbInfo.height = xr->height;
+			// Multiview render pass: layers must be 1 (view mask handles stereo)
+			fbInfo.layers = 1;
+
+			VK_CHECK( qvkCreateFramebuffer( vk.device, &fbInfo, NULL, &xr->directFramebuffers[i] ) );
+			SET_OBJECT_NAME( xr->directFramebuffers[i], va( "XR framebuffer %d (direct)", i ),
+				VK_DEBUG_REPORT_OBJECT_TYPE_FRAMEBUFFER_EXT );
+		}
+
+		ri.Printf( PRINT_ALL, "...XR direct-mode framebuffers created (%d%s)\n",
+			xr->colorInfo->imageCount, vk.msaaActive ? ", MSAA resolving into the swapchain" : "" );
+	}
+
 	return qtrue;
 }
 
@@ -11614,6 +11961,10 @@ void vk_destroy_xr_framebuffers( void )
 		if ( xr->framebuffers[i] != VK_NULL_HANDLE ) {
 			qvkDestroyFramebuffer( vk.device, xr->framebuffers[i], NULL );
 			xr->framebuffers[i] = VK_NULL_HANDLE;
+		}
+		if ( xr->directFramebuffers[i] != VK_NULL_HANDLE ) {
+			qvkDestroyFramebuffer( vk.device, xr->directFramebuffers[i], NULL );
+			xr->directFramebuffers[i] = VK_NULL_HANDLE;
 		}
 	}
 }
@@ -12067,8 +12418,8 @@ qboolean vk_create_virtual_screen_buffer( void )
 
 	// 3. Create image view (2D for shader sampling)
 	// Use UNORM format to prevent automatic sRGB→linear conversion when sampling.
-	// For r_fbo=0: source is sRGB, we want passthrough (no conversion)
-	// For r_fbo=1: source is linear HDR, UNORM sampling is fine (shader handles gamma)
+	// The blit source is the swapchain image in both modes, and what lands here
+	// is already display-encoded, so sampling must not decode it a second time
 	Com_Memset( &viewCI, 0, sizeof( viewCI ) );
 	viewCI.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 	viewCI.image = xr->virtualScreenImage;
@@ -13285,6 +13636,12 @@ static qboolean vk_create_xr_fbo_descriptors( void )
 		return qtrue;
 	}
 
+	// The same test vk_reallocate_xr_fbo_descriptors() makes: with no FBO color
+	// there is no image view to write, and a descriptor write needs a real one
+	if ( vk.color_image_view == VK_NULL_HANDLE ) {
+		return qtrue;
+	}
+
 	ri.Printf( PRINT_ALL, "Creating FBO descriptors...\n" );
 
 	// Set up sampler for post-processing: linear filtering, clamp to edge, no mipmaps
@@ -13372,7 +13729,7 @@ static qboolean vk_reallocate_xr_fbo_descriptors( void )
 	writeSet.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	writeSet.pImageInfo = &imageInfo;
 
-	// Reallocate FBO descriptors (fboActive always true in VR)
+	// Reallocate FBO descriptors; direct mode created no FBO color to point them at
 	if ( vk.multiviewSupported && vk.color_image_view != VK_NULL_HANDLE ) {
 		// Set up sampler for post-processing
 		Com_Memset( &samplerDef, 0, sizeof( samplerDef ) );
@@ -13493,8 +13850,13 @@ static qboolean vk_recreate_xr_render_pass( VkFormat colorFormat, VkFormat depth
 		return qfalse;
 	}
 
-	// The XR swapchain color format only reaches the gamma and virtual screen
-	// passes below; the main pass renders into the FBO and is rebuilt as it was
+	// The main pass renders into the FBO or the swapchain image depending on
+	// the mode; direct mode is what this function's XR color format is for.
+	// Direct mode renders into the swapchain image through the UNORM view, the
+	// same view the gamma pass writes under FBO: Quake 3 has no linear working
+	// space, so an sRGB view would encode every color a second time
+	vk.mainColorFormat = vk.fboActive ? vk.color_format : vk_get_unorm_format( colorFormat );
+
 	vk_create_main_render_pass( "XR formats known" );
 
 	// The gamma pass below shares this description and is multiview like the rest
@@ -13617,12 +13979,15 @@ static qboolean vk_recreate_xr_render_pass( VkFormat colorFormat, VkFormat depth
 		subpass.pColorAttachments = &colorRef;
 		subpass.pDepthStencilAttachment = &depthRef;
 
-		// Dependencies
+		// Dependencies. The transfer terms order this pass against the blit that
+		// filled the virtual screen texture. The depth terms are for direct mode,
+		// where the main pass wrote the very depth image this pass then clears:
+		// under the FBO that was a different image and nothing needed ordering.
 		vsDeps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
 		vsDeps[0].dstSubpass = 0;
-		vsDeps[0].srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+		vsDeps[0].srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
 		vsDeps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-		vsDeps[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		vsDeps[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 		vsDeps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 		vsDeps[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
 
@@ -13672,9 +14037,12 @@ static qboolean vk_recreate_xr_render_pass( VkFormat colorFormat, VkFormat depth
 	}
 
 	// The framebuffers were built against the initial render passes and must
-	// follow the ones just recreated
-	vk_create_fbo_framebuffers();
-	ri.Printf( PRINT_ALL, "Recreated FBO framebuffers with new render passes\n" );
+	// follow the ones just recreated. Direct mode built none: vk_create_xr_framebuffers()
+	// builds its own over the swapchain images once this returns
+	if ( vk.fboActive ) {
+		vk_create_fbo_framebuffers();
+		ri.Printf( PRINT_ALL, "Recreated FBO framebuffers with new render passes\n" );
+	}
 
 	{
 		VkFormat gammaFormat = vk_get_unorm_format( colorFormat );
@@ -13744,7 +14112,12 @@ qboolean vk_init_xr_resources( void )
 		return qfalse;
 	}
 
+	// The pass above settled vk.mainColorFormat and the framebuffers below bind
+	// these views, so the transient pair is built between the two
+	vk_create_direct_transient_images();
+
 	if ( !vk_create_xr_framebuffers() ) {
+		vk_destroy_direct_transient_images();
 		vk_destroy_xr_native_depth();
 		vk_destroy_xr_image_views();
 		return qfalse;
@@ -13754,6 +14127,7 @@ qboolean vk_init_xr_resources( void )
 	// Main FBO, bloom images, and bloom framebuffers are created in vk_create_attachments/vk_create_framebuffers
 	if ( !vk_create_xr_gamma_framebuffers() ) {
 		vk_destroy_xr_framebuffers();
+		vk_destroy_direct_transient_images();
 		vk_destroy_xr_native_depth();
 		vk_destroy_xr_image_views();
 		return qfalse;
@@ -13762,6 +14136,7 @@ qboolean vk_init_xr_resources( void )
 	if ( !vk_create_xr_fbo_descriptors() ) {
 		vk_destroy_gamma_framebuffers();
 		vk_destroy_xr_framebuffers();
+		vk_destroy_direct_transient_images();
 		vk_destroy_xr_native_depth();
 		vk_destroy_xr_image_views();
 		return qfalse;
@@ -13809,6 +14184,7 @@ void vk_shutdown_xr_resources( void )
 	vk_destroy_virtual_screen_buffer();
 	vk_destroy_hud_buffer();
 	vk_destroy_xr_framebuffers();
+	vk_destroy_direct_transient_images();  // Built here too, from vk_init_xr_resources
 	vk_destroy_xr_native_depth();  // Native depth buffer (replaces XR depth swapchain)
 	vk_destroy_xr_image_views();
 

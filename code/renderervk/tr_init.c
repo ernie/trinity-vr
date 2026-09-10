@@ -1827,10 +1827,17 @@ static void R_Register( void )
 	r_device->modified = qfalse;
 
 	r_fbo = ri.Cvar_Get( "r_fbo", "1", CVAR_ARCHIVE_ND | CVAR_LATCH );
-	ri.Cvar_CheckRange( r_fbo, 1, 1, qtrue );  // Always enabled in VR for post-processing
-	ri.Cvar_SetDescription( r_fbo, "Framebuffer objects (always enabled in Q3VR)." );
+	ri.Cvar_CheckRange( r_fbo, 0, 1, qtrue );
+	ri.Cvar_SetDescription( r_fbo, "Render through an offscreen framebuffer.\n"
+		"  0: draw straight into the headset's swapchain image. No overbright, so "
+		"multi-stage surfaces and blends look different. No bloom, greyscale, dithering, "
+		S_COLOR_CYAN "\\r_hdr" S_COLOR_WHITE ", HDR mirror output or screenshots; "
+		S_COLOR_CYAN "\\r_gamma" S_COLOR_WHITE " is baked into textures at load instead of "
+		"applied per frame, so it needs a " S_COLOR_CYAN "\\vid_restart" S_COLOR_WHITE ". "
+		"MSAA resolves into the swapchain.\n"
+		"  1: default. Everything above is available and the frame costs a post chain." );
 	r_hdr = ri.Cvar_Get( "r_hdr", "0", CVAR_ARCHIVE_ND | CVAR_LATCH );
-	ri.Cvar_SetDescription(r_hdr, "Enables high dynamic range frame buffer texture format.\n -1: 4-bit, for testing purposes, heavy color banding, might not work on all systems\n  0: 8 bit, default, moderate color banding with multi-stage shaders\n  1: 16 bit, enhanced blending precision, no color banding, might decrease performance on AMD / Intel GPUs\n" );
+	ri.Cvar_SetDescription(r_hdr, "Enables high dynamic range frame buffer texture format.\n -1: 4-bit, for testing purposes, heavy color banding, might not work on all systems\n  0: 8 bit, default, moderate color banding with multi-stage shaders\n  1: 16 bit, enhanced blending precision, no color banding, might decrease performance on AMD / Intel GPUs\nRequires " S_COLOR_CYAN "\\r_fbo 1." );
 	r_hdrDisplay = ri.Cvar_Get( "r_hdrDisplay", "0", CVAR_ARCHIVE_ND | CVAR_LATCH );
 	ri.Cvar_SetDescription( r_hdrDisplay, "True HDR output (scRGB FP16) on the desktop mirror window. Requires the Vulkan renderer, an HDR monitor, and (Windows) the OS HDR switch on. Takes effect after a \\vid_restart." );
 

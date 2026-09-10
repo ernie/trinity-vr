@@ -459,6 +459,11 @@ typedef struct {
 	// Direct XR swapchain framebuffers (used when FBO is NOT active)
 	VkFramebuffer framebuffers[MAX_SWAPCHAIN_IMAGES];
 
+	// Direct mode: the main pass renders into the swapchain image itself.
+	// Separate from framebuffers[], which is the virtual screen's and has a
+	// different attachment count under MSAA.
+	VkFramebuffer directFramebuffers[MAX_SWAPCHAIN_IMAGES];
+
 	// HUD buffer (1280x960, single layer) for HUD mode 1 sprite
 	VkImage hudImage;
 	VkImageView hudView;           // 2D_ARRAY view for framebuffer
@@ -574,7 +579,7 @@ typedef struct {
 	struct {
 		VkRenderPass main;        // Multiview main rendering (clears framebuffer)
 		VkRenderPass screenmap;
-		VkRenderPass gamma;       // Multiview gamma correction (if r_fbo)
+		VkRenderPass gamma;       // Multiview gamma correction; built in both modes, entered only under the FBO
 		VkRenderPass bloom_extract; // Multiview bloom extraction
 		VkRenderPass blur[VK_NUM_BLOOM_PASSES*2]; // Multiview blur passes
 		VkRenderPass post_bloom;  // Multiview post-bloom blend
@@ -619,6 +624,18 @@ typedef struct {
 
 	VkImage msaa_image;
 	VkImageView msaa_image_view;
+
+	// Direct mode with MSAA: the scene draws into these and the store resolves
+	// color into the swapchain image, so nothing reads either afterwards. They
+	// own their memory instead of taking a slice of the batched attachment pool,
+	// because the color's format is the XR swapchain's and is not known until
+	// long after the pool is packed.
+	VkImage transient_color_image;
+	VkImageView transient_color_image_view;
+	VkDeviceMemory transient_color_memory;
+	VkImage transient_depth_image;
+	VkImageView transient_depth_image_view;
+	VkDeviceMemory transient_depth_memory;
 
 	// screenMap
 	struct {
@@ -822,6 +839,10 @@ typedef struct {
 	float maxLod;
 
 	VkFormat color_format;
+	// What the main pass declares for its color attachment: the FBO's format,
+	// or in direct mode the swapchain view's, which is known only once the XR
+	// swapchain exists and the pass is rebuilt
+	VkFormat mainColorFormat;
 	VkFormat capture_format;
 	VkFormat depth_format;
 	VkFormat bloom_format;
