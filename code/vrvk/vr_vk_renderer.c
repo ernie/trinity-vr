@@ -534,10 +534,56 @@ static void VR_Renderer_EndFrame(VR_Engine* engine)
 }
 
 
+/*
+==================
+VR_LocateHeadInStage
+
+The head in the runtime's own stage frame. VR_Recenter bakes it into the new
+space's pose so the origin sits under the head: cameras that offset from an
+absolute vr.hmdposition would otherwise pivot on the runtime's anchor.
+==================
+*/
+static qboolean VR_LocateHeadInStage(VR_Engine* engine, XrTime predictedDisplayTime, XrVector3f* offset)
+{
+	XrReferenceSpaceCreateInfo rawStageCreateInfo = {0};
+	XrSpaceLocation loc = {0};
+	XrSpace rawStageSpace = XR_NULL_HANDLE;
+	qboolean located = qfalse;
+
+	// Identity pose: the offset belongs in the frame the space is created in
+	rawStageCreateInfo.type = XR_TYPE_REFERENCE_SPACE_CREATE_INFO;
+	rawStageCreateInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+	rawStageCreateInfo.poseInReferenceSpace.orientation.w = 1.0f;
+	XR_CHECK(
+		xrCreateReferenceSpace(engine->appState.Session, &rawStageCreateInfo, &rawStageSpace),
+		"Failed to create reference space (raw stage)");
+
+	loc.type = XR_TYPE_SPACE_LOCATION;
+	XR_CHECK(
+		xrLocateSpace(engine->appState.HeadSpace, rawStageSpace, predictedDisplayTime, &loc),
+		"Failed to locate head in raw stage space");
+	if (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
+	{
+		offset->x = loc.pose.position.x;
+		offset->y = 0.0f;	// STAGE already floors at y = 0
+		offset->z = loc.pose.position.z;
+		located = qtrue;
+	}
+
+	XR_CHECK(
+		xrDestroySpace(rawStageSpace),
+		"Failed to destroy raw stage space");
+
+	return located;
+}
+
+
 static void VR_Recenter(VR_Engine* engine, XrTime predictedDisplayTime)
 {
 	// Calculate recenter reference
 	XrReferenceSpaceCreateInfo spaceCreateInfo = {0};
+	XrVector3f stageOffset = {0};
+	qboolean haveStageOffset = qfalse;
 	spaceCreateInfo.type = XR_TYPE_REFERENCE_SPACE_CREATE_INFO;
 	spaceCreateInfo.poseInReferenceSpace.orientation.w = 1.0f;
 	if (engine->appState.CurrentSpace != XR_NULL_HANDLE)
@@ -555,6 +601,11 @@ static void VR_Recenter(VR_Engine* engine, XrTime predictedDisplayTime)
 		spaceCreateInfo.poseInReferenceSpace.orientation.y = sin(vr.recenterYaw / 2);
 		spaceCreateInfo.poseInReferenceSpace.orientation.z = 0;
 		spaceCreateInfo.poseInReferenceSpace.orientation.w = cos(vr.recenterYaw / 2);
+
+		if (stageSupported)
+		{
+			haveStageOffset = VR_LocateHeadInStage(engine, predictedDisplayTime, &stageOffset);
+		}
 	}
 
 	// Delete previous space instances
@@ -583,12 +634,17 @@ static void VR_Recenter(VR_Engine* engine, XrTime predictedDisplayTime)
 
 	if (stageSupported)
 	{
+		// Centered on the head, so the origin rides with the player
 		spaceCreateInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+		spaceCreateInfo.poseInReferenceSpace.position.x = haveStageOffset ? stageOffset.x : 0.0f;
 		spaceCreateInfo.poseInReferenceSpace.position.y = 0.0f;
+		spaceCreateInfo.poseInReferenceSpace.position.z = haveStageOffset ? stageOffset.z : 0.0f;
 		XR_CHECK(
 			xrCreateReferenceSpace(engine->appState.Session, &spaceCreateInfo, &engine->appState.StageSpace),
 			"Failed to create reference space (stage)");
-		printf("Created stage space\n");
+		Com_Printf("Created stage space, centered on the head at (%.2f, %.2f) meters\n",
+			spaceCreateInfo.poseInReferenceSpace.position.x,
+			spaceCreateInfo.poseInReferenceSpace.position.z);
 		engine->appState.CurrentSpace = engine->appState.StageSpace;
 	}
 
