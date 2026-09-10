@@ -168,6 +168,9 @@ if(DEFINED PRIMARY_CLIENT)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_SOURCE_DIR}/code/thirdparty/openal-soft-1.25.1/COPYING"
         "$<TARGET_FILE_DIR:${PRIMARY_CLIENT}>/licenses/COPYING.openal-soft"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/code/thirdparty/licenses"
+        "$<TARGET_FILE_DIR:${PRIMARY_CLIENT}>/licenses/"
     )
 endif()
 
