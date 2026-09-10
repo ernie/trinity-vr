@@ -18,6 +18,13 @@ XrResult VR_VK_GetGraphicsRequirements(XrInstance instance, XrSystemId systemId,
 // Print graphics requirements debug info
 void VR_VK_PrintGraphicsRequirements(const VR_VK_GraphicsRequirements* requirements);
 
+#define VR_MAX_SHADING_RATES 16
+
+typedef struct {
+    uint32_t width, height;
+    VkSampleCountFlags sampleCounts;
+} VR_ShadingRate;
+
 // Vulkan state managed by VR layer for OpenXR integration
 // This is created before renderervk initialization and passed to it
 typedef struct {
@@ -52,6 +59,18 @@ typedef struct {
     // instance creation, not confirmed enabled by the runtime. With no layer
     // listening the names simply go nowhere either way.
     VkBool32 debugUtilsEnabled;
+
+    // VK_KHR_fragment_shading_rate. Not VK_EXT_fragment_density_map: that is a
+    // tiler design no desktop part implements. A rate is a discrete
+    // (log2 w << 2) | log2 h in an R8_UINT texel, not a per-axis density.
+    VkBool32 shadingRateSupported;      // extension present AND attachmentFragmentShadingRate
+    uint32_t shadingRateTexelWidth;     // the attachment's texel grid
+    uint32_t shadingRateTexelHeight;
+    uint32_t shadingRateMaxWidth;       // coarsest fragment the device will produce
+    uint32_t shadingRateMaxHeight;
+    VkBool32 shadingRateLayered;        // layeredShadingRateAttachments: one layer per eye under multiview
+    VR_ShadingRate shadingRates[VR_MAX_SHADING_RATES];
+    uint32_t shadingRateCount;
 } VR_VulkanState;
 
 // Global VR Vulkan state
@@ -88,6 +107,18 @@ typedef struct {
     uint32_t queueFamilyIndex;
     VkBool32 swapchainColorspaceEnabled;  // VK_EXT_swapchain_colorspace enabled on the instance
     VkBool32 debugUtilsEnabled;           // VK_EXT_debug_utils advertised by the loader, requested at instance creation
+
+    // VK_KHR_fragment_shading_rate. Not VK_EXT_fragment_density_map: that is a
+    // tiler design no desktop part implements. A rate is a discrete
+    // (log2 w << 2) | log2 h in an R8_UINT texel, not a per-axis density.
+    VkBool32 shadingRateSupported;      // extension present AND attachmentFragmentShadingRate
+    uint32_t shadingRateTexelWidth;     // the attachment's texel grid
+    uint32_t shadingRateTexelHeight;
+    uint32_t shadingRateMaxWidth;       // coarsest fragment the device will produce
+    uint32_t shadingRateMaxHeight;
+    VkBool32 shadingRateLayered;        // layeredShadingRateAttachments: one layer per eye under multiview
+    VR_ShadingRate shadingRates[VR_MAX_SHADING_RATES];
+    uint32_t shadingRateCount;
 } VR_VulkanDeviceInfo;
 
 // Get the XR-created Vulkan device for renderer initialization

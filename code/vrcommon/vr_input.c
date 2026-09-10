@@ -324,7 +324,7 @@ static qboolean IN_SendInputAction(const char* action, qboolean inputActive, flo
 				{
 					vr.weapon_select_using_thumbstick = qfalse;
 					vr.weapon_select_autoclose = qfalse;
-					Cbuf_AddText("weapon_select");
+					Cbuf_AddText("weapon_select\n");
 				}
 			}
 		}

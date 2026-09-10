@@ -5,6 +5,7 @@
 #include "vr_clientinfo.h"
 #include "vr_shared.h"
 #include "vr_debug.h"
+#include "../vrvk/vr_vk.h"
 
 #include "vr_bhaptics.h"
 #include "vr_debug.h"
@@ -124,6 +125,15 @@ const char* VR_GetDeclaredApiVersion(void)
 	return s_declaredApiVersion;
 }
 
+const char* VR_FoveationCapsString(void)
+{
+	const VR_VulkanDeviceInfo* info = VR_Vulkan_GetDeviceInfo();
+	if (info && info->shadingRateSupported) {
+		return "fixed";
+	}
+	return "none";
+}
+
 static void VR_BuildExtensionList(void)
 {
 	numRequiredExtensions = 0;
@@ -168,6 +178,14 @@ void VR_EnsureGraphicsInitialized( void )
 
 	// Creates the VkInstance and VkDevice through xrCreateVulkanInstanceKHR and xrCreateVulkanDeviceKHR
 	VR_Graphics_Init( vr_engine.appState.Instance, vr_engine.appState.SystemId );
+
+	// vr_foveationCaps is registered CVAR_ROM "none" in VR_InitCvars, which
+	// runs from CL_Init well before this function's first successful call
+	// (from CL_InitRef) creates the Vulkan device -- VR_FoveationCapsString
+	// has nothing to read that early. Refresh it here instead of folding it
+	// back into VR_InitCvars: VR_FoveationCapsString reports "none" on its
+	// own if VR_Graphics_Init just failed, so this is correct either way.
+	Cvar_Set2( "vr_foveationCaps", VR_FoveationCapsString(), qtrue );
 
 	vr_graphicsInitialized = qtrue;
 }

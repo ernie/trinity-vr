@@ -803,7 +803,11 @@ void RB_DrawDeferredHud( void ) {
 	// RF_DEPTHHACK: same weapon depth range the sprite used in the main pass.
 	tess.depthRange = DEPTH_RANGE_WEAPON;
 	RB_AddQuadStamp( deferredHudOrigin, deferredHudLeft, deferredHudUp, deferredHudColor );
+	// The sprite carries the HUD, so it is read rather than looked past; without
+	// this its corners coarsen wherever the falloff puts them.
+	vk.rateExempt = qtrue;
 	RB_EndSurface();
+	vk.rateExempt = qfalse;
 	tess.depthRange = DEPTH_RANGE_NORMAL; // reset; nothing after should inherit the weapon range
 
 	// Restore MVP so the HUD camera can't leak into subsequent 2D drawing.

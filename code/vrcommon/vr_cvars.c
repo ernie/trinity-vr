@@ -49,6 +49,9 @@ cvar_t *vr_triggerSensitivity = NULL;
 cvar_t *vr_analogWalk = NULL;
 cvar_t *vr_frameTimingLog = NULL;
 cvar_t *vr_layerSourceAlpha = NULL;
+cvar_t *vr_foveation = NULL;
+cvar_t *vr_foveationStrength = NULL;
+cvar_t *vr_foveationCaps = NULL;
 
 void VR_InitCvars( void )
 {
@@ -101,6 +104,21 @@ void VR_InitCvars( void )
 	vr_analogWalk = Cvar_Get ("vr_analogWalk", "1", CVAR_ARCHIVE); // 0 - classic always-run, 1 - silent walk below run speed
 	vr_frameTimingLog = Cvar_Get ("vr_frameTimingLog", "0", 0); // diagnostic: log XR frame pacing (shouldRender/predictedDisplayTime) to console
 	vr_layerSourceAlpha = Cvar_Get ("vr_layerSourceAlpha", "1", 0); // diagnostic: toggle XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT on the projection layer
+
+	// Defaults to off here where the standalone defaults to fixed: a Quest has
+	// no choice between image quality and time, a desktop part usually does,
+	// and this client's stance on defaults is r_fbo 1's -- don't change the
+	// picture the player already has.
+	vr_foveation = Cvar_Get( "vr_foveation", "0", CVAR_ARCHIVE );
+	Cvar_CheckRange( vr_foveation, 0, 2, qtrue );
+
+	vr_foveationStrength = Cvar_Get( "vr_foveationStrength", "2", CVAR_ARCHIVE );
+	Cvar_CheckRange( vr_foveationStrength, 1, 3, qtrue );
+
+	// "none" is correct here: the Vulkan device doesn't exist yet at this
+	// point in startup. VR_EnsureGraphicsInitialized refreshes this once the
+	// device facts VR_FoveationCapsString reads are actually known.
+	vr_foveationCaps = Cvar_Get( "vr_foveationCaps", "none", CVAR_ROM );
 
 	// Values are:  scale,right,up,forward,pitch,yaw,roll
 	// VALUES PROVIDED BY SkillFur - Thank-you!

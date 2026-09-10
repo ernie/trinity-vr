@@ -1438,6 +1438,7 @@ extern	cvar_t	*r_drawentities;		// disable/enable entity rendering
 extern	cvar_t	*r_drawworld;			// disable/enable world rendering
 extern	cvar_t	*r_speeds;				// various levels of information display
 extern	cvar_t	*r_gpuTimeLog;			// GPU frame time report, window length in frames
+extern	cvar_t	*r_foveationDebug;		// tints the main pass by the shading rate the hardware chose
 extern  cvar_t	*r_detailTextures;		// enables/disables detail texturing stages
 extern	cvar_t	*r_novis;				// disable/enable usage of PVS
 extern	cvar_t	*r_nocull;
@@ -2148,6 +2149,7 @@ void RE_SetVRHeadsetParms( const float projectionMatrix[16],
 						   const float projectionEye1[16],
 						   float combinedFovX,
 						   float halfIpdMeters );
+void RE_SetFoveation( int level, qboolean eyeTracked, const float centers[2][2] );
 void RE_ClearVRFramebuffer( int width, int height, qboolean isThirdPersonSpectator );
 void RE_SwapDesktopWindow( void );
 void RE_WaitForRenderComplete( void );

@@ -32,6 +32,16 @@ typedef struct VR_SwapchainInfos_s VR_SwapchainInfos;
 
 #define VR_MAX_REFRESH_RATES 16
 
+// vr_foveation: what the pattern follows; strength is separate, either pattern can be gentle or aggressive
+#define VR_FOVEATION_OFF          0
+#define VR_FOVEATION_FIXED        1
+#define VR_FOVEATION_EYE_TRACKED  2
+
+// vr_foveationStrength: how far detail drops off toward the edges
+#define VR_FOVEATION_STRENGTH_LOW     1
+#define VR_FOVEATION_STRENGTH_MEDIUM  2
+#define VR_FOVEATION_STRENGTH_HIGH    3
+
 typedef struct
 {
 	VR_SwapchainInfos* Swapchains;  // Pointer to graphics-specific swapchain info
@@ -39,6 +49,15 @@ typedef struct
 	float SupportedRefreshRates[VR_MAX_REFRESH_RATES]; // as enumerated from the runtime
 	uint32_t NumSupportedRefreshRates;
 } VR_Renderer;
+
+// What this Vulkan device (and, for Plan B, the runtime) can do for foveated
+// rendering, decided once at device creation.
+typedef enum
+{
+	VR_FOVEATION_CAPS_NONE,        // no usable shading-rate attachment
+	VR_FOVEATION_CAPS_FIXED,       // VK_KHR_fragment_shading_rate attachment feature
+	VR_FOVEATION_CAPS_EYE_TRACKED  // fixed plus the system reporting gaze tracking
+} VR_FoveationCaps;
 
 typedef struct
 {

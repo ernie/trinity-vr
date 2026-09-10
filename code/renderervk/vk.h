@@ -38,6 +38,17 @@
 #define HUD_BUFFER_WIDTH  1280
 #define HUD_BUFFER_HEIGHT 960
 
+// Mirrors VR_MAX_SHADING_RATES and VR_ShadingRate from vrvk/vr_vk.h. Copied
+// rather than included because that header pulls the OpenXR headers in behind
+// it, and every translation unit that takes vk.h would then carry them. The
+// copy into vk.shadingRates is clamped to this length where it is made.
+#define VK_MAX_SHADING_RATES 16
+
+typedef struct {
+	uint32_t width, height;
+	VkSampleCountFlags sampleCounts;
+} vk_shading_rate_t;
+
 #ifndef _DEBUG
 #define USE_DEDICATED_ALLOCATION
 #endif
@@ -188,6 +199,7 @@ typedef enum {
 	RENDER_PASS_SCREENMAP,
 	RENDER_PASS_POST_BLOOM,
 	RENDER_PASS_HUD,            // HUD buffer (1280x960) for HUD mode 1 sprite
+	RENDER_PASS_MAIN_2D,        // Main pass, 2D draws: same pass object, rate combiner KEEP
 	RENDER_PASS_COUNT
 } renderPass_t;
 
@@ -305,6 +317,10 @@ void vk_present_desktop_mirror( void );  // Desktop mirror: acquire, blit, prese
 
 void vk_end_render_pass( void );
 void vk_begin_main_render_pass( void );
+void vk_update_shading_rate( void );  // records the rate map upload; one image, so no index
+// Records what the map should hold. Called from outside the frame's command
+// buffer, so it touches no Vulkan object.
+void vk_set_foveation( int level, qboolean eyeTracked, const float centers[2][2] );
 void vk_begin_hud_render_pass( qboolean clear );
 void vk_end_hud_render_pass( void );
 qboolean vk_create_hud_buffer( void );
@@ -463,6 +479,54 @@ typedef struct {
 	// Separate from framebuffers[], which is the virtual screen's and has a
 	// different attachment count under MSAA.
 	VkFramebuffer directFramebuffers[MAX_SWAPCHAIN_IMAGES];
+
+	// Fixed foveation: the main pass's shading rate attachment. One image, not
+	// one per frame slot or swapchain index, because the barrier that precedes
+	// the upload orders the write against every rate read already submitted to
+	// the queue. That is also what leaves both framebuffer builders their
+	// shape: the FBO path has one shared main framebuffer, direct mode one per
+	// swapchain image, and a per-slot map would force an array on one and a
+	// cross product on the other.
+	VkImage shadingRateImage;
+	VkDeviceMemory shadingRateMemory;
+	VkImageView shadingRateView;
+	// The staging buffer, unlike the image, is per frame slot. A pipeline
+	// barrier orders the GPU against the GPU; nothing it can express orders a
+	// CPU write into host-mapped memory against a copy the GPU has not reached
+	// yet, and vk_begin_frame waits only on the slot it is about to reuse.
+	// Indexing by vk.cmd_index is what makes that fence wait cover this buffer.
+	VkBuffer shadingRateStaging[NUM_COMMAND_BUFFERS];
+	VkDeviceMemory shadingRateStagingMemory[NUM_COMMAND_BUFFERS];
+	void *shadingRateStagingMapped[NUM_COMMAND_BUFFERS];
+	uint32_t shadingRateWidth;      // in rate texels, not pixels
+	uint32_t shadingRateHeight;
+	uint32_t shadingRateLayers;     // one per eye where the device allows it, else 1
+	qboolean foveationActive;       // every consumer is guarded on this
+
+	// What the VR layer asked for, recorded by vk_set_foveation outside the
+	// frame and read by vk_update_shading_rate when the frame's main pass opens
+	int foveationLevel;             // VR_FOVEATION_STRENGTH_*, 0 for off
+	qboolean foveationEyeTracked;
+	float foveationCenter[2][2];    // per eye, in NDC, y running down the image
+
+	// The falloff drawn once at twice the map's size, so moving an eye's window
+	// over it is a row copy rather than a rebuild. One byte a texel, the
+	// finished rate: the density-to-rate conversion depends on strength and
+	// sample count but never on position, so it belongs in the template.
+	byte *shadingRateTemplate;
+	int shadingRateTemplateLevel;   // -1 until built
+	qboolean shadingRateTemplateEyeTracked;
+	int shadingRateTemplateSamples; // the legal rate set changes with samples
+
+	// What the image already holds. One image, so one copy of this, not one a
+	// frame slot; vk_begin_main_render_pass runs twice in a frame that draws a
+	// screenmap, and this is what makes the second call a no-op.
+	qboolean shadingRateUploaded;
+	int shadingRateAppliedLevel;
+	qboolean shadingRateAppliedEyeTracked;
+	int shadingRateAppliedSamples;
+	uint32_t shadingRateAppliedOffset[2][2];  // [eye][x,y], in map texels
+	int shadingRateRebuilds;        // TEMPORARY, remove before this branch ships
 
 	// HUD buffer (1280x960, single layer) for HUD mode 1 sprite
 	VkImage hudImage;
@@ -747,6 +811,8 @@ typedef struct {
 		VkShaderModule gamma_fs;
 		VkShaderModule gamma_vs;
 
+		VkShaderModule foveationdebug_fs;  // reuses gamma_vs for its fullscreen quad
+
 		VkShaderModule fog_fs;  // multiview
 		VkShaderModule fog_vs;  // multiview
 
@@ -822,6 +888,10 @@ typedef struct {
 	VkPipeline blur_pipeline[VK_NUM_BLOOM_PASSES*2];
 	VkPipeline bloom_blend_pipeline;
 
+	// Built lazily on first r_foveationDebug enable, not alongside the pipelines
+	// above: a player who never types the cvar should not pay for it.
+	VkPipeline foveation_debug_pipeline;
+
 	uint32_t frame_count;
 	qboolean active;
 	qboolean wideLines;
@@ -831,6 +901,18 @@ typedef struct {
 	qboolean debugNames;
 	qboolean multiviewSupported;   // VK_KHR_multiview available
 	qboolean depthClamp;           // depth clamp for z-fail shadow volumes
+
+	// VK_KHR_fragment_shading_rate, cached from VR_VulkanDeviceInfo at device
+	// pickup so nothing in the renderer reaches back into the VR layer's struct
+	// mid-frame; the rate list is read on every pipeline template build
+	qboolean shadingRateSupported;
+	uint32_t shadingRateTexelWidth;   // the attachment's texel grid
+	uint32_t shadingRateTexelHeight;
+	uint32_t shadingRateMaxWidth;     // coarsest fragment the device will produce
+	uint32_t shadingRateMaxHeight;
+	qboolean shadingRateLayered;      // layeredShadingRateAttachments: one layer per eye
+	vk_shading_rate_t shadingRates[VK_MAX_SHADING_RATES];
+	uint32_t shadingRateCount;
 
 	VkResolveModeFlagBits depthResolveMode;   // main pass depth resolve, MAX under reversed depth
 	VkResolveModeFlagBits stencilResolveMode; // NONE unless the device couples it to depth
@@ -869,6 +951,7 @@ typedef struct {
 	float renderScaleY;
 
 	renderPass_t renderPassIndex;
+	qboolean rateExempt;		// a 3D draw the player reads rather than looks past
 	qboolean inRenderPass;		// true when actually inside a render pass
 	qboolean recordingCommands;	// true when command buffer is recording (between Begin/End)
 	qboolean descriptorsReady;	// qfalse between vk_release_resources() and vk_init_descriptors(): pool contents are dead

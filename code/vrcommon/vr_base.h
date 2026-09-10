@@ -18,6 +18,11 @@ const char *VR_GetRuntimeDescription( void );
 // Empty string before VR_Init has created the instance.
 const char *VR_GetDeclaredApiVersion( void );
 
+// "none" or "fixed": what foveated rendering the Vulkan device can do.
+// "none" before the device exists. Plan B adds "eyetracked" once the gaze
+// arm exists; written so that case is added, not rewritten.
+const char *VR_FoveationCapsString( void );
+
 VR_Engine* VR_Init( void );
 VR_Engine* VR_GetEngine( void );
 void VR_Destroy( VR_Engine* engine );

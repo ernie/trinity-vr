@@ -142,6 +142,7 @@ cvar_t	*r_drawentities;
 cvar_t	*r_drawworld;
 cvar_t	*r_speeds;
 cvar_t	*r_gpuTimeLog;
+cvar_t	*r_foveationDebug;
 cvar_t	*r_fullbright;
 cvar_t	*r_novis;
 cvar_t	*r_nocull;
@@ -1718,6 +1719,9 @@ static void R_Register( void )
 	ri.Cvar_SetDescription( r_speeds, "Prints out various debugging stats from PVS:\n 0: Disabled\n 1: Backend BSP\n 2: Frontend grid culling\n 3: Current view cluster index\n 4: Dynamic lighting\n 5: zFar clipping\n 6: Flares" );
 	r_gpuTimeLog = ri.Cvar_Get( "r_gpuTimeLog", "0", CVAR_TEMP );
 	ri.Cvar_SetDescription( r_gpuTimeLog, "Prints the GPU time of the eye buffer frame as a median, p95 and max over that many frames. 0 turns it off." );
+
+	r_foveationDebug = ri.Cvar_Get( "r_foveationDebug", "0", CVAR_TEMP );
+	ri.Cvar_SetDescription( r_foveationDebug, "Tints the main pass by the shading rate the hardware chose. Requires " S_COLOR_CYAN "\\vr_foveation 1." );
 	r_debugSurface = ri.Cvar_Get ("r_debugSurface", "0", CVAR_CHEAT);
 	ri.Cvar_SetDescription( r_debugSurface, "Backend visual debugging tool for bezier mesh surfaces." );
 	r_nobind = ri.Cvar_Get ("r_nobind", "0", CVAR_CHEAT);
@@ -2248,6 +2252,12 @@ qboolean RE_InitXRResources( void ) {
 	return vk_init_xr_resources();
 }
 
+void RE_SetFoveation( int level, qboolean eyeTracked, const float centers[2][2] ) {
+	// Records only: this runs from the VR layer outside the frame's command
+	// buffer, and vk_update_shading_rate acts on it when the main pass opens
+	vk_set_foveation( level, eyeTracked, centers );
+}
+
 /*
 ============================================================================
 
@@ -2346,6 +2356,7 @@ refexport_t *GetRefAPI ( int apiVersion, refimport_t *rimp ) {
 	re.HUDBufferStart = RE_HUDBufferStart;
 	re.HUDBufferEnd = RE_HUDBufferEnd;
 	re.SetVRHeadsetParms = RE_SetVRHeadsetParms;
+	re.SetFoveation = RE_SetFoveation;
 	re.InitXRResources = RE_InitXRResources;
 	re.BeginXRFrame = RE_BeginXRFrame;
 	re.ClearVRFramebuffer = RE_ClearVRFramebuffer;

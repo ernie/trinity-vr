@@ -24,7 +24,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "tr_types.h"
 
-#define	REF_API_VERSION		10
+#define	REF_API_VERSION		11
 
 //
 // Shutdown codes for renderer shutdown
@@ -107,6 +107,11 @@ typedef struct {
 	void	(*SetVRHeadsetParms)( const float projectionMatrix[16], const float nonVRProjectionMatrix[16], int renderBuffer,
 								  const float projectionEye0[16], const float projectionEye1[16],
 								  float combinedFovX, float halfIpdMeters );
+
+	// Fixed foveation: strength, whether the centers follow a gaze, and one NDC
+	// center an eye. Recorded only -- the map is rewritten when the frame that
+	// needs it opens.
+	void	(*SetFoveation)( int level, qboolean eyeTracked, const float centers[2][2] );
 
 	// VR framebuffer operations: called from vrcommon, implemented by each renderer
 	qboolean (*InitXRResources)( void );  // Initialize XR resources after swapchains created (Vulkan)

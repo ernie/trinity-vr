@@ -137,6 +137,14 @@ const VR_VulkanDeviceInfo* VR_Vulkan_GetDeviceInfo(void)
     info.queueFamilyIndex = vr_vk.queueFamilyIndex;
     info.swapchainColorspaceEnabled = vr_vk.swapchainColorspaceEnabled;
     info.debugUtilsEnabled = vr_vk.debugUtilsEnabled;
+    info.shadingRateSupported = vr_vk.shadingRateSupported;
+    info.shadingRateTexelWidth = vr_vk.shadingRateTexelWidth;
+    info.shadingRateTexelHeight = vr_vk.shadingRateTexelHeight;
+    info.shadingRateMaxWidth = vr_vk.shadingRateMaxWidth;
+    info.shadingRateMaxHeight = vr_vk.shadingRateMaxHeight;
+    info.shadingRateLayered = vr_vk.shadingRateLayered;
+    memcpy(info.shadingRates, vr_vk.shadingRates, sizeof(info.shadingRates));
+    info.shadingRateCount = vr_vk.shadingRateCount;
     return &info;
 }
 
@@ -454,11 +462,92 @@ XrResult VR_Vulkan_CreateDevice(XrInstance xrInstance, XrSystemId systemId)
     const char* extensions[8];
     uint32_t extensionCount = 0;
 
+    // Both halves or neither: the extension can be present while the attachment
+    // feature is not, and only the attachment feature makes a rate map readable.
+    vr_vk.shadingRateSupported = VK_FALSE;
+    if (VR_Vulkan_DeviceExtensionSupported(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME)) {
+        VkPhysicalDeviceFragmentShadingRateFeaturesKHR srFeatures = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR,
+        };
+        VkPhysicalDeviceFeatures2 probe = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            .pNext = &srFeatures,
+        };
+        vkGetPhysicalDeviceFeatures2(vr_vk.physicalDevice, &probe);
+        if (srFeatures.attachmentFragmentShadingRate) {
+            vr_vk.shadingRateSupported = VK_TRUE;
+        }
+    }
+
+    if (vr_vk.shadingRateSupported) {
+        VkPhysicalDeviceFragmentShadingRatePropertiesKHR srProps = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_PROPERTIES_KHR,
+        };
+        VkPhysicalDeviceProperties2 props2 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            .pNext = &srProps,
+        };
+        vkGetPhysicalDeviceProperties2(vr_vk.physicalDevice, &props2);
+
+        // Min and max are equal on both parts in this machine; take min, and the
+        // renderer sizes the map from it either way.
+        vr_vk.shadingRateTexelWidth  = srProps.minFragmentShadingRateAttachmentTexelSize.width;
+        vr_vk.shadingRateTexelHeight = srProps.minFragmentShadingRateAttachmentTexelSize.height;
+        vr_vk.shadingRateMaxWidth    = srProps.maxFragmentSize.width;
+        vr_vk.shadingRateMaxHeight   = srProps.maxFragmentSize.height;
+        vr_vk.shadingRateLayered     = srProps.layeredShadingRateAttachments;
+
+        PFN_vkGetPhysicalDeviceFragmentShadingRatesKHR getRates =
+            (PFN_vkGetPhysicalDeviceFragmentShadingRatesKHR)vkGetInstanceProcAddr(
+                vr_vk.instance, "vkGetPhysicalDeviceFragmentShadingRatesKHR");
+
+        vr_vk.shadingRateCount = 0;
+        if (getRates) {
+            VkPhysicalDeviceFragmentShadingRateKHR rates[VR_MAX_SHADING_RATES];
+            uint32_t count = VR_MAX_SHADING_RATES;
+            uint32_t i;
+
+            for (i = 0; i < VR_MAX_SHADING_RATES; i++) {
+                rates[i].sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_KHR;
+                rates[i].pNext = NULL;
+            }
+            // VK_INCOMPLETE is a success here: it means more rates exist than the
+            // array holds, and the ones returned are still the finest.
+            if (getRates(vr_vk.physicalDevice, &count, rates) >= VK_SUCCESS) {
+                if (count > VR_MAX_SHADING_RATES) count = VR_MAX_SHADING_RATES;
+                for (i = 0; i < count; i++) {
+                    vr_vk.shadingRates[i].width  = rates[i].fragmentSize.width;
+                    vr_vk.shadingRates[i].height = rates[i].fragmentSize.height;
+                    vr_vk.shadingRates[i].sampleCounts = rates[i].sampleCounts;
+                }
+                vr_vk.shadingRateCount = count;
+            }
+        }
+
+        // A map with nothing legal to put in it is worse than no map at all.
+        if (vr_vk.shadingRateCount == 0) {
+            vr_vk.shadingRateSupported = VK_FALSE;
+        }
+    }
+
+    Com_Printf("[VRVK] Fragment shading rate: %s", vr_vk.shadingRateSupported ? "yes" : "no");
+    if (vr_vk.shadingRateSupported) {
+        Com_Printf(" (attachment texel %ux%u, max fragment %ux%u, layered %s, %u rates)",
+                   vr_vk.shadingRateTexelWidth, vr_vk.shadingRateTexelHeight,
+                   vr_vk.shadingRateMaxWidth, vr_vk.shadingRateMaxHeight,
+                   vr_vk.shadingRateLayered ? "yes" : "no", vr_vk.shadingRateCount);
+    }
+    Com_Printf("\n");
+
     extensions[extensionCount++] = VK_KHR_MULTIVIEW_EXTENSION_NAME;               // For stereo rendering
     extensions[extensionCount++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;               // For desktop mirror window
     extensions[extensionCount++] = VK_KHR_MAINTENANCE_4_EXTENSION_NAME;           // Relaxes push constant validation
     extensions[extensionCount++] = VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME;     // Render pass form the depth resolve needs
     extensions[extensionCount++] = VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME;   // Main pass resolves depth for the post pass
+
+    if (vr_vk.shadingRateSupported) {
+        extensions[extensionCount++] = VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME;
+    }
 
     // Both are Vulkan 1.2 core and present on every part that runs a PCVR
     // runtime, and the renderer has no path without them
@@ -511,15 +600,24 @@ XrResult VR_Vulkan_CreateDevice(XrInstance xrInstance, XrSystemId systemId)
         .multiviewTessellationShader = VK_FALSE,
     };
 
+    // pipelineFragmentShadingRate stays VK_FALSE: this plan uses no per-draw
+    // pipeline rate, only the attachment and static combiners.
+    VkPhysicalDeviceFragmentShadingRateFeaturesKHR shadingRateFeatures = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR,
+        .pNext = &multiviewFeatures,
+        .attachmentFragmentShadingRate = VK_TRUE,
+    };
+
     VkPhysicalDeviceFeatures2 features2 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-        .pNext = &multiviewFeatures,
+        .pNext = vr_vk.shadingRateSupported ? (void*)&shadingRateFeatures : (void*)&multiviewFeatures,
     };
     // Get all supported features
     vkGetPhysicalDeviceFeatures2(vr_vk.physicalDevice, &features2);
     // Ensure required features are enabled after querying
     multiviewFeatures.multiview = VK_TRUE;
     maintenance4Features.maintenance4 = VK_TRUE;
+    shadingRateFeatures.attachmentFragmentShadingRate = VK_TRUE;
 
     // Queue create info
     float queuePriority = 1.0f;

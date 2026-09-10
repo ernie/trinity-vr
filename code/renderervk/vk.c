@@ -817,8 +817,9 @@ vk_create_render_pass2
 
 The renderpass2 form of a single-subpass pass. Descriptions stay in the 1.0
 structures the rest of this file writes and are converted here, so only the
-passes that need a renderpass2-only chain pay for the second form. A NULL
-depthResolveRef creates the pass the 1.0 entry point would.
+passes that need a renderpass2-only chain pay for the second form. Each
+optional contributor pushes onto one subpass pNext chain; passing NULL for
+both refs creates the pass the 1.0 entry point would.
 
 VkAttachmentReference2::aspectMask is read only for input attachments, of
 which this renderer declares none, so every reference leaves it zero.
@@ -826,19 +827,23 @@ which this renderer declares none, so every reference leaves it zero.
 */
 static VkRenderPass vk_create_render_pass2( const VkAttachmentDescription *attachments, uint32_t attachmentCount,
 	const VkSubpassDescription *subpass, uint32_t viewMask, uint32_t correlationMask,
-	const VkSubpassDependency *deps, uint32_t depCount, const VkAttachmentReference *depthResolveRef )
+	const VkSubpassDependency *deps, uint32_t depCount, const VkAttachmentReference *depthResolveRef,
+	const VkAttachmentReference *shadingRateRef, uint32_t texelWidth, uint32_t texelHeight )
 {
 	VkAttachmentDescription2 attachments2[8];
 	VkAttachmentReference2 colorRefs2[2];
 	VkAttachmentReference2 resolveRefs2[2];
 	VkAttachmentReference2 depthRef2;
 	VkAttachmentReference2 depthResolveRef2;
+	VkAttachmentReference2 shadingRateRef2;
 	VkSubpassDescription2 subpass2;
 	VkSubpassDependency2 deps2[4];
 	VkSubpassDescriptionDepthStencilResolve resolve;
+	VkFragmentShadingRateAttachmentInfoKHR shadingRate;
 	VkRenderPassCreateInfo2 desc2;
 	VkRenderPass renderPass;
 	uint32_t i;
+	void *subpassChain = NULL;
 
 	if ( attachmentCount > ARRAY_LEN( attachments2 ) || depCount > ARRAY_LEN( deps2 ) ||
 		subpass->colorAttachmentCount > ARRAY_LEN( colorRefs2 ) || subpass->inputAttachmentCount != 0 ||
@@ -914,8 +919,27 @@ static VkRenderPass vk_create_render_pass2( const VkAttachmentDescription *attac
 		resolve.stencilResolveMode = vk.stencilResolveMode;
 		resolve.pDepthStencilResolveAttachment = &depthResolveRef2;
 
-		subpass2.pNext = &resolve;
+		resolve.pNext = subpassChain;
+		subpassChain = &resolve;
 	}
+
+	if ( shadingRateRef != NULL ) {
+		Com_Memset( &shadingRateRef2, 0, sizeof( shadingRateRef2 ) );
+		shadingRateRef2.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+		shadingRateRef2.attachment = shadingRateRef->attachment;
+		shadingRateRef2.layout = shadingRateRef->layout;
+
+		Com_Memset( &shadingRate, 0, sizeof( shadingRate ) );
+		shadingRate.sType = VK_STRUCTURE_TYPE_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR;
+		shadingRate.pFragmentShadingRateAttachment = &shadingRateRef2;
+		shadingRate.shadingRateAttachmentTexelSize.width = texelWidth;
+		shadingRate.shadingRateAttachmentTexelSize.height = texelHeight;
+
+		shadingRate.pNext = subpassChain;
+		subpassChain = &shadingRate;
+	}
+
+	subpass2.pNext = subpassChain;
 
 	Com_Memset( &desc2, 0, sizeof( desc2 ) );
 	desc2.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2;
@@ -947,13 +971,14 @@ tell the two builds of this pass apart.
 */
 static void vk_create_main_render_pass( const char *why )
 {
-	VkAttachmentDescription attachments[6]; // color | depth | msaa color | emissive resolve | emissive msaa | depth resolve
+	VkAttachmentDescription attachments[7]; // color | depth | msaa color | emissive resolve | emissive msaa | depth resolve | shading rate
 	VkAttachmentReference colorResolveRef;
 	VkAttachmentReference colorResolveRefs[2];
 	VkAttachmentReference colorRef0;
 	VkAttachmentReference colorRefs[2];
 	VkAttachmentReference depthRef0;
 	VkAttachmentReference depthResolveRef;
+	VkAttachmentReference shadingRateRef;
 	VkSubpassDescription subpass;
 	VkSubpassDependency deps[2];
 	uint32_t viewMask = 0b11;        // Both eyes (views 0 and 1)
@@ -1122,13 +1147,37 @@ static void vk_create_main_render_pass( const char *why )
 		attachmentCount++;
 	}
 
+	if ( vk.xr.foveationActive ) {
+		// Read during rasterization, never written by the pass, and its contents
+		// are put there by the copy in vk_begin_main_render_pass. In fixed mode that
+		// copy runs once, not on every frame, so this pass must STORE what it loaded —
+		// a DONT_CARE here would let a driver discard the map's one and only upload.
+		// Appended after the depth resolve so both non-cleared attachments trail the
+		// cleared ones and clearValueCount stays as it is.
+		attachments[attachmentCount].format = VK_FORMAT_R8_UINT;
+		attachments[attachmentCount].samples = VK_SAMPLE_COUNT_1_BIT;
+		attachments[attachmentCount].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+		attachments[attachmentCount].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		attachments[attachmentCount].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		attachments[attachmentCount].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		attachments[attachmentCount].initialLayout = VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR;
+		attachments[attachmentCount].finalLayout = VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR;
+
+		shadingRateRef.attachment = attachmentCount;
+		shadingRateRef.layout = VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR;
+		attachmentCount++;
+	}
+
 	vk.render_pass.main = vk_create_render_pass2( attachments, attachmentCount, &subpass,
 		viewMask, correlationMask, deps, ARRAY_LEN( deps ),
-		vk.depthResolveActive ? &depthResolveRef : NULL );
+		vk.depthResolveActive ? &depthResolveRef : NULL,
+		vk.xr.foveationActive ? &shadingRateRef : NULL,
+		vk.shadingRateTexelWidth, vk.shadingRateTexelHeight );
 	SET_OBJECT_NAME( vk.render_pass.main, va( "render pass - XR main (multiview, %s)", why ), VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT );
-	ri.Printf( PRINT_ALL, "Created main render pass (%s): %p (%s, attachments: %u, MSAA: %s)\n",
+	ri.Printf( PRINT_ALL, "Created main render pass (%s): %p (%s, attachments: %u, MSAA: %s, shading rate: %s)\n",
 		why, (void*)vk.render_pass.main, vk.fboActive ? "FBO" : "direct",
-		attachmentCount, vk.msaaActive ? "yes" : "no" );
+		attachmentCount, vk.msaaActive ? "yes" : "no",
+		vk.xr.foveationActive ? "yes" : "no" );
 }
 
 
@@ -1390,11 +1439,13 @@ static void vk_create_render_passes( void )
 				postAttachmentCount = 3;
 			}
 
-			// Renderpass2, as the main pass, so D4 can chain a shading rate attachment.
+			// Renderpass2, as the main pass, so the two share one converter. It
+			// carries no shading rate attachment: only the scene pass is foveated,
+			// so the 2D, the flares and the HUD sprite drawn here stay full rate.
 			// deps[0..1] are the depth-aware external pair; deps[2] belongs to the
 			// color-only passes above and does not apply here.
 			vk.render_pass.post_bloom = vk_create_render_pass2( attachments, postAttachmentCount, &subpass,
-				viewMask, correlationMask, deps, 2, NULL );
+				viewMask, correlationMask, deps, 2, NULL, NULL, 0, 0 );
 			SET_OBJECT_NAME( vk.render_pass.post_bloom, "render pass - XR post bloom (multiview)", VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT );
 		}
 
@@ -2375,6 +2426,26 @@ static void init_vulkan_library( void )
 	// Gates the entry point every SET_OBJECT_NAME call goes through; without it
 	// those calls return early and a capture names bare handles
 	vk.debugNames = xrDevice->debugUtilsEnabled ? qtrue : qfalse;
+
+	vk.shadingRateSupported = xrDevice->shadingRateSupported ? qtrue : qfalse;
+	vk.shadingRateTexelWidth = xrDevice->shadingRateTexelWidth;
+	vk.shadingRateTexelHeight = xrDevice->shadingRateTexelHeight;
+	vk.shadingRateMaxWidth = xrDevice->shadingRateMaxWidth;
+	vk.shadingRateMaxHeight = xrDevice->shadingRateMaxHeight;
+	vk.shadingRateLayered = xrDevice->shadingRateLayered ? qtrue : qfalse;
+	{
+		uint32_t i;
+
+		vk.shadingRateCount = xrDevice->shadingRateCount;
+		if ( vk.shadingRateCount > ARRAY_LEN( vk.shadingRates ) ) {
+			vk.shadingRateCount = ARRAY_LEN( vk.shadingRates );
+		}
+		for ( i = 0; i < vk.shadingRateCount; i++ ) {
+			vk.shadingRates[i].width = xrDevice->shadingRates[i].width;
+			vk.shadingRates[i].height = xrDevice->shadingRates[i].height;
+			vk.shadingRates[i].sampleCounts = xrDevice->shadingRates[i].sampleCounts;
+		}
+	}
 
 	ri.Printf( PRINT_ALL, "[VK] Using VR-provided Vulkan device\n" );
 
@@ -3632,6 +3703,12 @@ static void vk_create_shader_modules( void )
 	SET_OBJECT_NAME( vk.modules.gamma_fs, "gamma post-processing fragment module", VK_DEBUG_REPORT_OBJECT_TYPE_SHADER_MODULE_EXT );
 	SET_OBJECT_NAME( vk.modules.gamma_vs, "gamma post-processing vertex module", VK_DEBUG_REPORT_OBJECT_TYPE_SHADER_MODULE_EXT );
 
+	// Module always exists; the pipeline that uses it is built lazily on first
+	// r_foveationDebug enable, so the shader costs the binary nothing else.
+	vk.modules.foveationdebug_fs = SHADER_MODULE( foveationdebug_frag_spv );
+
+	SET_OBJECT_NAME( vk.modules.foveationdebug_fs, "foveation debug fragment module", VK_DEBUG_REPORT_OBJECT_TYPE_SHADER_MODULE_EXT );
+
 	vk.modules.virtualscreen_vs = SHADER_MODULE( virtualscreen_vert_spv );
 	vk.modules.virtualscreen_fs = SHADER_MODULE( virtualscreen_frag_spv );
 
@@ -4446,6 +4523,221 @@ static void vk_create_direct_transient_images( void )
 
 /*
 ==================
+vk_destroy_shading_rate_image
+
+Idempotent, so vk_create_shading_rate_image can unwind through it and the
+teardown that never brought XR resources up can call it as a backstop.
+==================
+*/
+static void vk_destroy_shading_rate_image( void )
+{
+	VkXrResources *xr = &vk.xr;
+	uint32_t i;
+
+	for ( i = 0; i < NUM_COMMAND_BUFFERS; i++ ) {
+		if ( xr->shadingRateStagingMapped[i] != NULL ) {
+			qvkUnmapMemory( vk.device, xr->shadingRateStagingMemory[i] );
+			xr->shadingRateStagingMapped[i] = NULL;
+		}
+		if ( xr->shadingRateStaging[i] != VK_NULL_HANDLE ) {
+			qvkDestroyBuffer( vk.device, xr->shadingRateStaging[i], NULL );
+			xr->shadingRateStaging[i] = VK_NULL_HANDLE;
+		}
+		if ( xr->shadingRateStagingMemory[i] != VK_NULL_HANDLE ) {
+			qvkFreeMemory( vk.device, xr->shadingRateStagingMemory[i], NULL );
+			xr->shadingRateStagingMemory[i] = VK_NULL_HANDLE;
+		}
+	}
+	if ( xr->shadingRateView != VK_NULL_HANDLE ) {
+		qvkDestroyImageView( vk.device, xr->shadingRateView, NULL );
+		xr->shadingRateView = VK_NULL_HANDLE;
+	}
+	if ( xr->shadingRateImage != VK_NULL_HANDLE ) {
+		qvkDestroyImage( vk.device, xr->shadingRateImage, NULL );
+		xr->shadingRateImage = VK_NULL_HANDLE;
+	}
+	if ( xr->shadingRateMemory != VK_NULL_HANDLE ) {
+		qvkFreeMemory( vk.device, xr->shadingRateMemory, NULL );
+		xr->shadingRateMemory = VK_NULL_HANDLE;
+	}
+	if ( xr->shadingRateTemplate != NULL ) {
+		ri.Free( xr->shadingRateTemplate );
+		xr->shadingRateTemplate = NULL;
+	}
+	xr->shadingRateTemplateLevel = -1;
+	xr->shadingRateWidth = 0;
+	xr->shadingRateHeight = 0;
+	xr->shadingRateLayers = 0;
+	xr->foveationActive = qfalse;
+}
+
+
+/*
+==================
+vk_create_shading_rate_image
+
+The main pass's shading rate attachment, built from vk_init_xr_resources before
+the pass and either framebuffer builder runs: all three read foveationActive,
+and a pass that declares the attachment while a framebuffer does not bind it
+(or the reverse) is an incompatible pair.
+
+Fails clean. foveationActive stays false and every consumer is guarded on it,
+so a device without the extension, or a failed allocation, degrades to the
+unfoveated pass rather than to a crash.
+==================
+*/
+static void vk_create_shading_rate_image( uint32_t fbWidth, uint32_t fbHeight, uint32_t eyeLayers )
+{
+	VkXrResources *xr = &vk.xr;
+	VkImageCreateInfo imageInfo;
+	VkImageViewCreateInfo viewInfo;
+	VkBufferCreateInfo bufferInfo;
+	VkMemoryRequirements memReqs;
+	VkMemoryAllocateInfo allocInfo;
+	const uint32_t texelW = vk.shadingRateTexelWidth;
+	const uint32_t texelH = vk.shadingRateTexelHeight;
+	void *mapped = NULL;
+	uint32_t i;
+
+	vk_destroy_shading_rate_image();
+
+	if ( !vk.shadingRateSupported ) {
+		return;
+	}
+
+	if ( texelW == 0 || texelH == 0 || fbWidth == 0 || fbHeight == 0 || eyeLayers == 0 ) {
+		ri.Printf( PRINT_WARNING, "vk_create_shading_rate_image: no usable geometry (%ux%u over %ux%u texels, %u layers)\n",
+			fbWidth, fbHeight, texelW, texelH, eyeLayers );
+		return;
+	}
+
+	// The attachment grid is the device's, not ours: one rate texel covers
+	// texelW x texelH pixels.
+	xr->shadingRateWidth = ( fbWidth + texelW - 1 ) / texelW;
+	xr->shadingRateHeight = ( fbHeight + texelH - 1 ) / texelH;
+	// One layer per eye where the device allows it; a single layer otherwise,
+	// which the falloff fills from the mean of the two centers.
+	xr->shadingRateLayers = vk.shadingRateLayered ? eyeLayers : 1;
+
+	Com_Memset( &imageInfo, 0, sizeof( imageInfo ) );
+	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	imageInfo.imageType = VK_IMAGE_TYPE_2D;
+	imageInfo.format = VK_FORMAT_R8_UINT;
+	imageInfo.extent.width = xr->shadingRateWidth;
+	imageInfo.extent.height = xr->shadingRateHeight;
+	imageInfo.extent.depth = 1;
+	imageInfo.mipLevels = 1;
+	imageInfo.arrayLayers = xr->shadingRateLayers;
+	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	imageInfo.usage = VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	// Its own allocation rather than a slice of the batched attachment pool,
+	// which is packed inside vk_initialize and sized by MAX_ATTACHMENTS_IN_POOL
+	Com_Memset( &allocInfo, 0, sizeof( allocInfo ) );
+	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+
+	if ( qvkCreateImage( vk.device, &imageInfo, NULL, &xr->shadingRateImage ) != VK_SUCCESS ) {
+		ri.Printf( PRINT_WARNING, "vk_create_shading_rate_image: image creation failed; foveation off\n" );
+		vk_destroy_shading_rate_image();
+		return;
+	}
+
+	qvkGetImageMemoryRequirements( vk.device, xr->shadingRateImage, &memReqs );
+	allocInfo.allocationSize = memReqs.size;
+	allocInfo.memoryTypeIndex = find_memory_type( memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT );
+	if ( qvkAllocateMemory( vk.device, &allocInfo, NULL, &xr->shadingRateMemory ) != VK_SUCCESS ||
+		qvkBindImageMemory( vk.device, xr->shadingRateImage, xr->shadingRateMemory, 0 ) != VK_SUCCESS ) {
+		ri.Printf( PRINT_WARNING, "vk_create_shading_rate_image: image memory failed; foveation off\n" );
+		vk_destroy_shading_rate_image();
+		return;
+	}
+
+	Com_Memset( &viewInfo, 0, sizeof( viewInfo ) );
+	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	viewInfo.image = xr->shadingRateImage;
+	viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;  // as the color and depth arrays are viewed here
+	viewInfo.format = VK_FORMAT_R8_UINT;
+	viewInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+	viewInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+	viewInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+	viewInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+	viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	viewInfo.subresourceRange.baseMipLevel = 0;
+	viewInfo.subresourceRange.levelCount = 1;
+	viewInfo.subresourceRange.baseArrayLayer = 0;
+	viewInfo.subresourceRange.layerCount = xr->shadingRateLayers;
+	if ( qvkCreateImageView( vk.device, &viewInfo, NULL, &xr->shadingRateView ) != VK_SUCCESS ) {
+		ri.Printf( PRINT_WARNING, "vk_create_shading_rate_image: view creation failed; foveation off\n" );
+		vk_destroy_shading_rate_image();
+		return;
+	}
+
+	// One byte a texel: a rate is a single R8_UINT value, not the two R8G8_UNORM
+	// fractions a density map carries. One buffer a frame slot: the two barriers
+	// order the GPU's copy against the GPU's rate reads, but the host writes this
+	// memory, and only vk_begin_frame's fence wait on the slot it is reusing
+	// orders that write against a copy the GPU has not run yet.
+	Com_Memset( &bufferInfo, 0, sizeof( bufferInfo ) );
+	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	bufferInfo.size = (VkDeviceSize)xr->shadingRateWidth * xr->shadingRateHeight * xr->shadingRateLayers;
+	bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+	bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+	for ( i = 0; i < NUM_COMMAND_BUFFERS; i++ ) {
+		if ( qvkCreateBuffer( vk.device, &bufferInfo, NULL, &xr->shadingRateStaging[i] ) != VK_SUCCESS ) {
+			ri.Printf( PRINT_WARNING, "vk_create_shading_rate_image: staging buffer failed; foveation off\n" );
+			vk_destroy_shading_rate_image();
+			return;
+		}
+
+		qvkGetBufferMemoryRequirements( vk.device, xr->shadingRateStaging[i], &memReqs );
+		allocInfo.allocationSize = memReqs.size;
+		allocInfo.memoryTypeIndex = find_memory_type( memReqs.memoryTypeBits,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT );
+		if ( qvkAllocateMemory( vk.device, &allocInfo, NULL, &xr->shadingRateStagingMemory[i] ) != VK_SUCCESS ||
+			qvkBindBufferMemory( vk.device, xr->shadingRateStaging[i], xr->shadingRateStagingMemory[i], 0 ) != VK_SUCCESS ||
+			qvkMapMemory( vk.device, xr->shadingRateStagingMemory[i], 0, VK_WHOLE_SIZE, 0, &mapped ) != VK_SUCCESS ) {
+			ri.Printf( PRINT_WARNING, "vk_create_shading_rate_image: staging memory failed; foveation off\n" );
+			vk_destroy_shading_rate_image();
+			return;
+		}
+		xr->shadingRateStagingMapped[i] = mapped;
+
+		SET_OBJECT_NAME( xr->shadingRateStaging[i], va( "shading rate map staging %u", i ),
+			VK_DEBUG_REPORT_OBJECT_TYPE_BUFFER_EXT );
+		SET_OBJECT_NAME( xr->shadingRateStagingMemory[i], va( "shading rate map staging %u", i ),
+			VK_DEBUG_REPORT_OBJECT_TYPE_DEVICE_MEMORY_EXT );
+	}
+
+	SET_OBJECT_NAME( xr->shadingRateImage, "shading rate map", VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT );
+	SET_OBJECT_NAME( xr->shadingRateMemory, "shading rate map", VK_DEBUG_REPORT_OBJECT_TYPE_DEVICE_MEMORY_EXT );
+	SET_OBJECT_NAME( xr->shadingRateView, "shading rate map", VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_VIEW_EXT );
+
+	// Twice the map in each axis, so an eye's window can sit anywhere over it
+	xr->shadingRateTemplate = (byte*)ri.Malloc( (int)( xr->shadingRateWidth * 2 * xr->shadingRateHeight * 2 ) );
+	xr->shadingRateTemplateLevel = -1;
+
+	// A map recreated at a new size holds none of what the applied state
+	// describes, so leaving it set would skip the first upload into it
+	xr->shadingRateUploaded = qfalse;
+	xr->shadingRateAppliedLevel = 0;
+	xr->shadingRateAppliedEyeTracked = qfalse;
+	xr->shadingRateAppliedSamples = 0;
+	Com_Memset( xr->shadingRateAppliedOffset, 0, sizeof( xr->shadingRateAppliedOffset ) );
+
+	xr->foveationActive = qtrue;
+
+	ri.Printf( PRINT_ALL, "...shading rate map created (%ux%u texels of %ux%u px, %u layer%s)\n",
+		xr->shadingRateWidth, xr->shadingRateHeight, texelW, texelH,
+		xr->shadingRateLayers, xr->shadingRateLayers == 1 ? "" : "s" );
+}
+
+
+/*
+==================
 vk_create_fbo_framebuffers
 
 The main and post-bloom framebuffers, built here at init and again from
@@ -4455,7 +4747,7 @@ the two cannot drift.
 */
 static void vk_create_fbo_framebuffers( void )
 {
-	VkImageView attachments[6]; // color | depth | msaa color | emissive resolve | emissive msaa | depth resolve
+	VkImageView attachments[7]; // color | depth | msaa color | emissive resolve | emissive msaa | depth resolve | shading rate
 	VkImageView postAttachments[3]; // color | depth | emissive resolve, all single-sample
 	VkFramebufferCreateInfo desc;
 
@@ -4505,6 +4797,11 @@ static void vk_create_fbo_framebuffers( void )
 	if ( vk.depthResolveActive )
 	{
 		attachments[desc.attachmentCount++] = vk.depth_resolve_image_view;
+	}
+
+	if ( vk.xr.foveationActive )
+	{
+		attachments[desc.attachmentCount++] = vk.xr.shadingRateView;
 	}
 
 	VK_CHECK( qvkCreateFramebuffer( vk.device, &desc, NULL, &vk.framebuffers.main ) );
@@ -5484,10 +5781,12 @@ static void vk_destroy_attachments( void )
 		vk.depth_resolve_image_view = VK_NULL_HANDLE;
 	}
 
-	// Owns its own memory, so it frees itself rather than following the pool.
-	// vk_shutdown_xr_resources() gets there first in the normal order; this is
-	// the backstop for a teardown that never brought XR resources up.
+	// Own their memory, so they free themselves rather than following the pool.
+	// vk_shutdown_xr_resources() gets there first in the normal order; these are
+	// the backstop for a teardown that never brought XR resources up, and for an
+	// XR init that failed after building them.
 	vk_destroy_direct_transient_images();
+	vk_destroy_shading_rate_image();
 
 	if ( vk.screenMap.color_image ) {
 		qvkDestroyImage( vk.device, vk.screenMap.color_image, NULL );
@@ -5603,6 +5902,12 @@ static void vk_destroy_pipelines( qboolean resetCounter )
 	if ( vk.gamma_pipeline != VK_NULL_HANDLE ) {
 		qvkDestroyPipeline( vk.device, vk.gamma_pipeline, NULL );
 		vk.gamma_pipeline = VK_NULL_HANDLE;
+	}
+
+	// Rebuilt lazily against the next vk.render_pass.main, same as gamma above.
+	if ( vk.foveation_debug_pipeline != VK_NULL_HANDLE ) {
+		qvkDestroyPipeline( vk.device, vk.foveation_debug_pipeline, NULL );
+		vk.foveation_debug_pipeline = VK_NULL_HANDLE;
 	}
 
 	if ( vk.bloom_extract_pipeline != VK_NULL_HANDLE ) {
@@ -5786,6 +6091,8 @@ void vk_shutdown( refShutdownCode_t code )
 
 	qvkDestroyShaderModule(vk.device, vk.modules.gamma_vs, NULL);
 	qvkDestroyShaderModule(vk.device, vk.modules.gamma_fs, NULL);
+
+	qvkDestroyShaderModule(vk.device, vk.modules.foveationdebug_fs, NULL);
 
 	qvkDestroyShaderModule(vk.device, vk.modules.virtualscreen_vs, NULL);
 	qvkDestroyShaderModule(vk.device, vk.modules.virtualscreen_fs, NULL);
@@ -6472,6 +6779,17 @@ void vk_create_post_process_pipelines( void )
 		vk.gamma_pipeline = VK_NULL_HANDLE;
 	}
 
+	// This function does not rebuild the debug tint pipeline (it is built
+	// lazily, from vk_end_frame), but it can run after vk.render_pass.main was
+	// rebuilt underneath it; dropping a still-valid handle here just costs one
+	// more lazy rebuild next time r_foveationDebug draws, the same hitch the
+	// cvar already accepts on first enable.
+	if ( vk.foveation_debug_pipeline != VK_NULL_HANDLE ) {
+		vk_wait_idle();
+		qvkDestroyPipeline( vk.device, vk.foveation_debug_pipeline, NULL );
+		vk.foveation_debug_pipeline = VK_NULL_HANDLE;
+	}
+
 	set_shader_stage_desc( shader_stages+0, VK_SHADER_STAGE_VERTEX_BIT, vk.modules.gamma_vs, "main" );
 	set_shader_stage_desc( shader_stages+1, VK_SHADER_STAGE_FRAGMENT_BIT, vk.modules.gamma_fs, "main" );
 	shader_stages[1].pSpecializationInfo = &frag_spec_info;
@@ -6652,6 +6970,177 @@ void vk_create_post_process_pipelines( void )
 
 
 /*
+ * vk_create_foveation_debug_pipeline - Build the r_foveationDebug tint pipeline
+ *
+ * Not part of vk_create_post_process_pipelines above: built lazily by
+ * vk_end_frame on first enable so a player who never types the cvar pays
+ * nothing for it. Styled after the gamma pipeline immediately above, with
+ * four differences: it targets the main pass at the main pass's sample
+ * count rather than a single-sample post pass, blends instead of replacing,
+ * runs with depth test and write both off, and chains a shading rate state
+ * with combiners {KEEP, REPLACE} -- the same as 3D -- so it rasterizes at
+ * the map's rate instead of opting out to 1x1. A tint that opted out would
+ * report 1x1 everywhere and look like a broken map rather than a broken tint.
+ */
+static void vk_create_foveation_debug_pipeline( void )
+{
+	VkPipelineShaderStageCreateInfo shader_stages[2];
+	VkPipelineVertexInputStateCreateInfo vertex_input_state;
+	VkPipelineInputAssemblyStateCreateInfo input_assembly_state;
+	VkPipelineRasterizationStateCreateInfo rasterization_state;
+	VkPipelineDepthStencilStateCreateInfo depth_stencil_state;
+	VkPipelineViewportStateCreateInfo viewport_state;
+	VkPipelineMultisampleStateCreateInfo multisample_state;
+	VkPipelineColorBlendStateCreateInfo blend_state;
+	VkPipelineColorBlendAttachmentState attachment_blend_state;
+	VkPipelineColorBlendAttachmentState blend_attachments[2];
+	VkPipelineFragmentShadingRateStateCreateInfoKHR shadingRateState;
+	VkGraphicsPipelineCreateInfo create_info;
+	VkViewport viewport;
+	VkRect2D scissor;
+
+	vertex_input_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+	vertex_input_state.pNext = NULL;
+	vertex_input_state.flags = 0;
+	vertex_input_state.vertexBindingDescriptionCount = 0;
+	vertex_input_state.pVertexBindingDescriptions = NULL;
+	vertex_input_state.vertexAttributeDescriptionCount = 0;
+	vertex_input_state.pVertexAttributeDescriptions = NULL;
+
+	input_assembly_state.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+	input_assembly_state.pNext = NULL;
+	input_assembly_state.flags = 0;
+	input_assembly_state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+	input_assembly_state.primitiveRestartEnable = VK_FALSE;
+
+	rasterization_state.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+	rasterization_state.pNext = NULL;
+	rasterization_state.flags = 0;
+	rasterization_state.depthClampEnable = VK_FALSE;
+	rasterization_state.rasterizerDiscardEnable = VK_FALSE;
+	rasterization_state.polygonMode = VK_POLYGON_MODE_FILL;
+	rasterization_state.cullMode = VK_CULL_MODE_NONE;
+	rasterization_state.frontFace = VK_FRONT_FACE_CLOCKWISE;
+	rasterization_state.depthBiasEnable = VK_FALSE;
+	rasterization_state.depthBiasConstantFactor = 0.0f;
+	rasterization_state.depthBiasClamp = 0.0f;
+	rasterization_state.depthBiasSlopeFactor = 0.0f;
+	rasterization_state.lineWidth = 1.0f;
+
+	// The main pass's sample count, not the single-sample count the gamma/
+	// bloom pipelines above use for their own (post-process) passes.
+	multisample_state.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+	multisample_state.pNext = NULL;
+	multisample_state.flags = 0;
+	multisample_state.rasterizationSamples = vkSamples;
+	multisample_state.sampleShadingEnable = VK_FALSE;
+	multisample_state.minSampleShading = 1.0f;
+	multisample_state.pSampleMask = NULL;
+	multisample_state.alphaToCoverageEnable = VK_FALSE;
+	multisample_state.alphaToOneEnable = VK_FALSE;
+
+	// Goes over everything already in the pass: nothing to test or write.
+	Com_Memset( &depth_stencil_state, 0, sizeof( depth_stencil_state ) );
+	depth_stencil_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+	depth_stencil_state.depthTestEnable = VK_FALSE;
+	depth_stencil_state.depthWriteEnable = VK_FALSE;
+	depth_stencil_state.depthCompareOp = VK_COMPARE_OP_NEVER;
+
+	set_shader_stage_desc( shader_stages+0, VK_SHADER_STAGE_VERTEX_BIT, vk.modules.gamma_vs, "main" );
+	set_shader_stage_desc( shader_stages+1, VK_SHADER_STAGE_FRAGMENT_BIT, vk.modules.foveationdebug_fs, "main" );
+
+	// vk.renderWidth/Height are the main pass's dimensions here: this pipeline
+	// is built from vk_end_frame while that pass is still the open one, after
+	// vk_leave_hud_command_buffer has restored them from any HUD bracket.
+	viewport.x = 0.0f;
+	viewport.y = 0.0f;
+	viewport.width = (float)vk.renderWidth;
+	viewport.height = (float)vk.renderHeight;
+	viewport.minDepth = 0.0f;
+	viewport.maxDepth = 1.0f;
+
+	scissor.offset.x = 0;
+	scissor.offset.y = 0;
+	scissor.extent.width = vk.renderWidth;
+	scissor.extent.height = vk.renderHeight;
+
+	viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+	viewport_state.pNext = NULL;
+	viewport_state.flags = 0;
+	viewport_state.viewportCount = 1;
+	viewport_state.pViewports = &viewport;
+	viewport_state.scissorCount = 1;
+	viewport_state.pScissors = &scissor;
+
+	// Tints rather than replaces.
+	Com_Memset( &attachment_blend_state, 0, sizeof( attachment_blend_state ) );
+	attachment_blend_state.blendEnable = VK_TRUE;
+	attachment_blend_state.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+	attachment_blend_state.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	attachment_blend_state.colorBlendOp = VK_BLEND_OP_ADD;
+	attachment_blend_state.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+	attachment_blend_state.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	attachment_blend_state.alphaBlendOp = VK_BLEND_OP_ADD;
+	attachment_blend_state.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+											VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+	blend_attachments[0] = attachment_blend_state;
+
+	// vk.render_pass.main's subpass declares a second (emissive) color
+	// attachment whenever vk.hdrActive, independent of MSAA -- see the two
+	// "subpass.colorAttachmentCount = 2" sites in vk_create_main_render_pass.
+	// VkPipelineColorBlendStateCreateInfo::attachmentCount must match the
+	// subpass's color attachment count exactly, so this pipeline needs a
+	// second entry too. colorWriteMask 0 keeps the tint out of the emissive
+	// attachment, which the HDR desktop mirror later samples to encode: a
+	// screen-space overlay meant only for the headset's eye view must not
+	// bleed into that encode.
+	if ( vk.hdrActive ) {
+		blend_attachments[1] = attachment_blend_state;
+		blend_attachments[1].colorWriteMask = 0;
+		blend_state.attachmentCount = 2;
+	} else {
+		blend_state.attachmentCount = 1;
+	}
+
+	blend_state.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+	blend_state.pNext = NULL;
+	blend_state.flags = 0;
+	blend_state.logicOpEnable = VK_FALSE;
+	blend_state.logicOp = VK_LOGIC_OP_COPY;
+	blend_state.pAttachments = blend_attachments;
+	Com_Memset( blend_state.blendConstants, 0, sizeof( blend_state.blendConstants ) );
+
+	// {KEEP, REPLACE}: the pipeline's own 1x1 rate yields to the map's, the
+	// same combiners create_pipeline chains for RENDER_PASS_MAIN.
+	Com_Memset( &shadingRateState, 0, sizeof( shadingRateState ) );
+	shadingRateState.sType = VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR;
+	shadingRateState.fragmentSize.width = 1;
+	shadingRateState.fragmentSize.height = 1;
+	shadingRateState.combinerOps[0] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR;
+	shadingRateState.combinerOps[1] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR;
+
+	Com_Memset( &create_info, 0, sizeof( create_info ) );
+	create_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+	create_info.pNext = &shadingRateState;
+	create_info.stageCount = 2;
+	create_info.pStages = shader_stages;
+	create_info.pVertexInputState = &vertex_input_state;
+	create_info.pInputAssemblyState = &input_assembly_state;
+	create_info.pViewportState = &viewport_state;
+	create_info.pRasterizationState = &rasterization_state;
+	create_info.pMultisampleState = &multisample_state;
+	create_info.pDepthStencilState = &depth_stencil_state;
+	create_info.pColorBlendState = &blend_state;
+	create_info.layout = vk.pipeline_layout_post_process;
+	create_info.renderPass = vk.render_pass.main;
+
+	VK_CHECK( qvkCreateGraphicsPipelines( vk.device, VK_NULL_HANDLE, 1, &create_info, NULL, &vk.foveation_debug_pipeline ) );
+	SET_OBJECT_NAME( vk.foveation_debug_pipeline, "foveation debug tint pipeline", VK_DEBUG_REPORT_OBJECT_TYPE_PIPELINE_EXT );
+}
+
+
+/*
  * vk_destroy_post_process_pipelines - Clean up post-processing pipelines
  */
 static void vk_destroy_post_process_pipelines( void )
@@ -6661,6 +7150,14 @@ static void vk_destroy_post_process_pipelines( void )
 	if ( vk.gamma_pipeline != VK_NULL_HANDLE ) {
 		qvkDestroyPipeline( vk.device, vk.gamma_pipeline, NULL );
 		vk.gamma_pipeline = VK_NULL_HANDLE;
+	}
+
+	// vk_shutdown_xr_resources runs this before vk_init_xr_resources rebuilds
+	// vk.render_pass.main; clearing the handle here is what makes the next
+	// r_foveationDebug enable rebuild against the pass that replaces it.
+	if ( vk.foveation_debug_pipeline != VK_NULL_HANDLE ) {
+		qvkDestroyPipeline( vk.device, vk.foveation_debug_pipeline, NULL );
+		vk.foveation_debug_pipeline = VK_NULL_HANDLE;
 	}
 
 	if ( vk.bloom_extract_pipeline != VK_NULL_HANDLE ) {
@@ -6724,6 +7221,7 @@ VkPipeline create_pipeline( const Vk_Pipeline_Def *def, renderPass_t renderPassI
 	VkPipelineColorBlendAttachmentState blend_attachments[2];
 	VkPipelineDynamicStateCreateInfo dynamic_state;
 	VkDynamicState dynamic_state_array[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	VkPipelineFragmentShadingRateStateCreateInfoKHR shadingRateState;
 	VkGraphicsPipelineCreateInfo create_info;
 	VkPipeline pipeline;
 	VkPipelineShaderStageCreateInfo shader_stages[2];
@@ -6736,8 +7234,10 @@ VkPipeline create_pipeline( const Vk_Pipeline_Def *def, renderPass_t renderPassI
 
 	// the emissive attachment only exists in these passes; fragment-module
 	// choice below must agree with the blend-state attachmentCount decision
-	// or the pipeline gets an unconsumed location-1 output
-	const qboolean emissiveActive = ( renderPassIndex == RENDER_PASS_MAIN || renderPassIndex == RENDER_PASS_POST_BLOOM ) && vk.hdrActive;
+	// or the pipeline gets an unconsumed location-1 output. RENDER_PASS_MAIN_2D
+	// draws into the same subpass as RENDER_PASS_MAIN, so it inherits the same
+	// attachment count.
+	const qboolean emissiveActive = ( renderPassIndex == RENDER_PASS_MAIN || renderPassIndex == RENDER_PASS_MAIN_2D || renderPassIndex == RENDER_PASS_POST_BLOOM ) && vk.hdrActive;
 	const int fs_em = emissiveActive ? 0 : 1;
 
 	switch ( def->shader_type ) {
@@ -7707,6 +8207,24 @@ VkPipeline create_pipeline( const Vk_Pipeline_Def *def, renderPass_t renderPassI
 
 	create_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
 	create_info.pNext = NULL;
+	if ( vk.xr.foveationActive ) {
+		// Static combiners, no dynamic state. A pipeline that chains nothing
+		// here gets Vulkan's defaults -- a 1x1 pipeline rate and KEEP for both
+		// combiners -- and a second combiner of KEEP discards the attachment,
+		// so without this the map would be correct and change nothing.
+		// The attachment replaces the pipeline rate in the pass that has one;
+		// every other pass declares no rate attachment, so KEEP there leaves
+		// the 1x1 pipeline rate standing.
+		Com_Memset( &shadingRateState, 0, sizeof( shadingRateState ) );
+		shadingRateState.sType = VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR;
+		shadingRateState.fragmentSize.width = 1;
+		shadingRateState.fragmentSize.height = 1;
+		shadingRateState.combinerOps[0] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR;
+		shadingRateState.combinerOps[1] = ( renderPassIndex == RENDER_PASS_MAIN )
+			? VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR
+			: VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR;
+		create_info.pNext = &shadingRateState;
+	}
 	create_info.flags = 0;
 	create_info.stageCount = ARRAY_LEN(shader_stages);
 	create_info.pStages = shader_stages;
@@ -7734,10 +8252,11 @@ VkPipeline create_pipeline( const Vk_Pipeline_Def *def, renderPass_t renderPassI
 		create_info.renderPass = vk.render_pass.post_bloom;
 	} else {
 		// Q3VR: Use main for main render pass (XR-only, no desktop rendering)
-		// RENDER_PASS_MAIN or any other value defaults to main
+		// RENDER_PASS_MAIN and RENDER_PASS_MAIN_2D share this pass object; any
+		// other value defaults to main
 		create_info.renderPass = vk.render_pass.main;
-		// Sanity check: if not RENDER_PASS_MAIN, sample count must match
-		if ( renderPassIndex != RENDER_PASS_MAIN ) {
+		// Sanity check: if neither of those, sample count must match
+		if ( renderPassIndex != RENDER_PASS_MAIN && renderPassIndex != RENDER_PASS_MAIN_2D ) {
 			ri.Printf( PRINT_WARNING, "create_pipeline: unexpected renderPassIndex %d, defaulting to main\n", renderPassIndex );
 		}
 	}
@@ -7791,7 +8310,18 @@ static uint32_t vk_alloc_pipeline( const Vk_Pipeline_Def *def ) {
 VkPipeline vk_gen_pipeline( uint32_t index ) {
 	if ( index < vk.pipelines_count ) {
 		VK_Pipeline_t *pipeline = vk.pipelines + index;
-		const renderPass_t pass = vk.renderPassIndex;
+		// Main-pass draws the player reads get their own handle so they can opt
+		// out of the rate map. In the FBO path with bloom on these land in the
+		// post pass instead and never reach here; with bloom off, and in direct
+		// mode, this is the only thing keeping them sharp. rateExempt covers the
+		// in-world HUD sprite, a world-space quad that fails the projection2D
+		// test while needing the same treatment.
+		renderPass_t pass = vk.renderPassIndex;
+
+		if ( pass == RENDER_PASS_MAIN && ( backEnd.projection2D || vk.rateExempt ) ) {
+			pass = RENDER_PASS_MAIN_2D;
+		}
+
 		if ( pipeline->handle[ pass ] == VK_NULL_HANDLE ) {
 			pipeline->handle[ pass ] = create_pipeline( &pipeline->def, pass, index );
 		}
@@ -8761,6 +9291,463 @@ static void vk_begin_render_pass( VkRenderPass renderPass, VkFramebuffer frameBu
 }
 
 
+/*
+==================
+vk_foveation_level_shape
+
+Falloff per strength, in fractions of the eye buffer's half diagonal: full density out
+to inner, down to floor by outer, floor to the corner. outer stays well under 1: the lens
+shows a rounded region, so past roughly 0.68 is a corner nobody sees. Fixed keeps a wide
+sharp region because the eyes rove while the head stays put.
+==================
+*/
+static void vk_foveation_level_shape( int level, qboolean eyeTracked, float *inner, float *outer, float *floorDensity )
+{
+	if ( eyeTracked ) {
+		// The floor stays near a quarter: an eighth shades one fragment per 8x8 block, which crawls this close to the fovea
+		switch ( level ) {
+			case VR_FOVEATION_STRENGTH_LOW:    *inner = 0.20f; *outer = 0.66f; *floorDensity = 0.26f; break;
+			case VR_FOVEATION_STRENGTH_MEDIUM: *inner = 0.12f; *outer = 0.56f; *floorDensity = 0.19f; break;
+			default:                           *inner = 0.05f; *outer = 0.42f; *floorDensity = 0.13f; break;
+		}
+		return;
+	}
+
+	// Measured on PICO at 1.3x: about 13, 19 and 26 percent off GPU frame time; fixed foveation stops paying below about a quarter
+	switch ( level ) {
+		case VR_FOVEATION_STRENGTH_LOW:    *inner = 0.30f; *outer = 0.62f; *floorDensity = 0.24f; break;
+		case VR_FOVEATION_STRENGTH_MEDIUM: *inner = 0.21f; *outer = 0.50f; *floorDensity = 0.15f; break;
+		// 0.08 shades about a sixty-fourth of the edge pixels; below that the periphery is mush for little gain
+		default:                           *inner = 0.13f; *outer = 0.40f; *floorDensity = 0.08f; break;
+	}
+}
+
+
+/*
+==================
+vk_encode_shading_rate
+
+The attachment texel value for a fragment size. The shader built-in reports the
+same packing, so one decoder serves the writer and the debug tint.
+==================
+*/
+static byte vk_encode_shading_rate( uint32_t w, uint32_t h )
+{
+	uint32_t lw = 0, lh = 0;
+
+	while ( ( 1u << ( lw + 1 ) ) <= w ) lw++;
+	while ( ( 1u << ( lh + 1 ) ) <= h ) lh++;
+	return (byte)( ( lw << 2 ) | lh );
+}
+
+
+/*
+==================
+vk_legal_shading_rate
+
+The coarsest listed rate at or below a request. A device will not accept a rate
+it did not list for the sample count in use, so a request is reduced rather than
+clamped: both axes at or below what was asked, largest such area wins. 1x1 is
+always legal.
+==================
+*/
+static void vk_legal_shading_rate( uint32_t reqW, uint32_t reqH, VkSampleCountFlagBits samples,
+	uint32_t *outW, uint32_t *outH )
+{
+	uint32_t i, bestW = 1, bestH = 1;
+
+	for ( i = 0; i < vk.shadingRateCount; i++ ) {
+		const uint32_t w = vk.shadingRates[i].width;
+		const uint32_t h = vk.shadingRates[i].height;
+
+		if ( w > reqW || h > reqH ) {
+			continue;
+		}
+		if ( ( vk.shadingRates[i].sampleCounts & samples ) == 0 ) {
+			continue;
+		}
+		if ( w * h > bestW * bestH ) {
+			bestW = w;
+			bestH = h;
+		}
+	}
+	*outW = bestW;
+	*outH = bestH;
+}
+
+
+/*
+==================
+vk_foveation_radius
+
+Where along the falloff the density first reaches a value, for the log line
+below. Returns 1.0 for a density the floor never descends to, which reads as
+past the far corner because the radius is normalized to it.
+==================
+*/
+static float vk_foveation_radius( float density, float inner, float span, float floorDensity )
+{
+	if ( density >= 1.0f ) {
+		return inner;
+	}
+	if ( density <= floorDensity ) {
+		return 1.0f;
+	}
+	return inner + span * ( 1.0f - density ) / ( 1.0f - floorDensity );
+}
+
+
+/*
+==================
+vk_build_foveation_template
+
+The falloff once, centered, at twice the map's size; each eye's map is a window of it,
+so moving the island is a copy, not a rebuild.
+
+One byte a texel, holding the finished rate rather than a density: the
+conversion depends on strength and sample count but never on position, so doing
+it here leaves the window copy a straight row memcpy. That is also why the
+sample count is part of the key -- the legal rate set narrows as samples rise,
+so a template built at 4x MSAA is wrong after r_ext_multisample and a vid_restart.
+==================
+*/
+static void vk_build_foveation_template( uint32_t width, uint32_t height, int level, qboolean eyeTracked,
+	VkSampleCountFlagBits samples )
+{
+	const uint32_t tw = width * 2, th = height * 2;
+	const float aspect = ( height > 0 ) ? (float)width / (float)height : 1.0f;
+	const float invHalfDiag = 1.0f / ( 0.5f * sqrtf( aspect * aspect + 1.0f ) );
+	// The spec's per-axis conversion: an edge of 1/density, snapped to 1, 2 or 4
+	// at the geometric midpoints of those steps
+	const float edge1to2 = sqrtf( 2.0f );
+	const float edge2to4 = sqrtf( 8.0f );
+	uint32_t midW, midH, floorW, floorH;
+	float inner, outer, floorDensity, span;
+	byte *dst;
+	uint32_t y, x;
+
+	if ( vk.xr.shadingRateTemplate == NULL ) {
+		return;
+	}
+	if ( vk.xr.shadingRateTemplateLevel == level &&
+		vk.xr.shadingRateTemplateEyeTracked == eyeTracked &&
+		vk.xr.shadingRateTemplateSamples == (int)samples ) {
+		return;
+	}
+
+	vk_foveation_level_shape( level, eyeTracked, &inner, &outer, &floorDensity );
+	span = outer - inner;
+	if ( span < 0.01f ) {
+		span = 0.01f;
+	}
+
+	vk_legal_shading_rate( 2, 2, samples, &midW, &midH );
+	vk_legal_shading_rate( 4, 4, samples, &floorW, &floorH );
+
+	// Distances are in map units, not template units: a window must span what it would if the map were drawn directly
+	dst = vk.xr.shadingRateTemplate;
+	for ( y = 0; y < th; y++ ) {
+		const float ny = ( (float)y + 0.5f ) / (float)height - 1.0f;
+		for ( x = 0; x < tw; x++ ) {
+			const float nx = ( ( (float)x + 0.5f ) / (float)width - 1.0f ) * aspect;
+			// Distance from the center, normalized so the far corner is 1
+			const float r = sqrtf( nx * nx + ny * ny ) * invHalfDiag;
+			float density, edge;
+			uint32_t reqW, rateW, rateH;
+
+			if ( r <= inner ) {
+				density = 1.0f;
+			} else {
+				const float t = ( r - inner ) / span;
+				density = 1.0f + ( floorDensity - 1.0f ) * ( t > 1.0f ? 1.0f : t );
+			}
+			if ( density > 1.0f ) density = 1.0f;
+			if ( density < floorDensity ) density = floorDensity;
+
+			edge = 1.0f / density;
+			reqW = ( edge < edge1to2 ) ? 1 : ( ( edge < edge2to4 ) ? 2 : 4 );
+			// The falloff is isotropic, so both axes ask for the same edge and
+			// only the device's rate list can make the answer anisotropic
+			vk_legal_shading_rate( reqW, reqW, samples, &rateW, &rateH );
+
+			*dst++ = vk_encode_shading_rate( rateW, rateH );
+		}
+	}
+
+	vk.xr.shadingRateTemplateLevel = level;
+	vk.xr.shadingRateTemplateEyeTracked = eyeTracked;
+	vk.xr.shadingRateTemplateSamples = (int)samples;
+
+	// TEMPORARY, remove before this branch ships. The ported constants were
+	// fitted against a continuous density that a density-map driver then
+	// quantizes. A shading rate is discrete from the start, so where the
+	// boundaries actually land is the only thing that matters here, and it is
+	// not visible from the constants.
+	ri.Printf( PRINT_ALL, "Foveation template: strength %i, %s, %ix MSAA -> "
+		"1x1 to r=%.3f, %ux%u to r=%.3f, floor %ux%u\n",
+		level, eyeTracked ? "gaze" : "fixed", (int)samples,
+		vk_foveation_radius( 1.0f / edge1to2, inner, span, floorDensity ), midW, midH,
+		vk_foveation_radius( 1.0f / edge2to4, inner, span, floorDensity ), floorW, floorH );
+}
+
+
+/*
+==================
+vk_foveation_window_offset
+
+Where this eye's map starts inside the template, in map texels, which is the
+granularity the output actually has: a center move smaller than one texel
+produces the same bytes.
+==================
+*/
+static void vk_foveation_window_offset( const float center[2], uint32_t width, uint32_t height,
+	uint32_t *ox, uint32_t *oy )
+{
+	// Centers arrive with y already running down the image, so neither axis flips
+	float cx = ( center[0] + 1.0f ) * 0.5f;
+	float cy = ( center[1] + 1.0f ) * 0.5f;
+
+	if ( cx < 0.0f ) cx = 0.0f; else if ( cx > 1.0f ) cx = 1.0f;
+	if ( cy < 0.0f ) cy = 0.0f; else if ( cy > 1.0f ) cy = 1.0f;
+
+	// Sliding the window the other way moves the island toward the gaze
+	*ox = (uint32_t)( ( 1.0f - cx ) * (float)width + 0.5f );
+	*oy = (uint32_t)( ( 1.0f - cy ) * (float)height + 0.5f );
+	if ( *ox > width ) *ox = width;
+	if ( *oy > height ) *oy = height;
+}
+
+
+static void vk_write_shading_rate_texels( byte *dst, uint32_t width, uint32_t height, uint32_t layers,
+	int level, qboolean eyeTracked, VkSampleCountFlagBits samples, const float center[2][2] )
+{
+	const uint32_t tw = width * 2;
+	uint32_t layer, y;
+
+	vk_build_foveation_template( width, height, level, eyeTracked, samples );
+
+	for ( layer = 0; layer < layers; layer++ ) {
+		// A single-layer map takes eye 0's window; vk_set_foveation has already
+		// averaged the two centers into it where the device forced one layer
+		const int eye = ( layer < 2 ) ? (int)layer : 0;
+		uint32_t ox, oy;
+
+		vk_foveation_window_offset( center[eye], width, height, &ox, &oy );
+
+		for ( y = 0; y < height; y++ ) {
+			Com_Memcpy( dst, vk.xr.shadingRateTemplate + (size_t)( oy + y ) * tw + ox, (size_t)width );
+			dst += (size_t)width;
+		}
+	}
+}
+
+
+/*
+==================
+vk_set_foveation
+
+What the map should hold, recorded from the VR layer once a frame before
+rendering. Nothing here touches a Vulkan object: it runs outside the frame's
+command buffer, and vk_update_shading_rate is what acts on it.
+==================
+*/
+void vk_set_foveation( int level, qboolean eyeTracked, const float centers[2][2] )
+{
+	int eye;
+
+	vk.xr.foveationLevel = ( level > 0 ) ? level : 0;
+	vk.xr.foveationEyeTracked = eyeTracked;
+
+	if ( centers == NULL ) {
+		Com_Memset( vk.xr.foveationCenter, 0, sizeof( vk.xr.foveationCenter ) );
+		return;
+	}
+	for ( eye = 0; eye < 2; eye++ ) {
+		vk.xr.foveationCenter[eye][0] = centers[eye][0];
+		vk.xr.foveationCenter[eye][1] = centers[eye][1];
+	}
+	// One layer covers both eyes, so it gets the point between them rather than
+	// either eye's axis
+	if ( vk.xr.shadingRateLayers < 2 ) {
+		vk.xr.foveationCenter[0][0] = 0.5f * ( centers[0][0] + centers[1][0] );
+		vk.xr.foveationCenter[0][1] = 0.5f * ( centers[0][1] + centers[1][1] );
+	}
+}
+
+
+/*
+==================
+vk_update_shading_rate
+
+Recorded from vk_begin_main_render_pass while no render pass is open, not from
+vk_begin_frame: that function's barriers[] is exactly full and its barrierCount
+is incremented with no bounds check, so a fourth barrier routed through it would
+overflow silently.
+
+vk_begin_main_render_pass has two callers -- frame start, and tr_backend.c after
+the screenmap pass -- so this can run twice against one frame slot's staging
+buffer, and both recorded copies read that buffer at execute time while the CPU
+wrote it at record time. Recording the applied state at the end is what makes
+the second call a no-op: vk_set_foveation runs once a frame from the VR layer
+before rendering, so nothing can have changed between the two. A separate
+per-frame guard would be the same test written twice.
+==================
+*/
+void vk_update_shading_rate( void )
+{
+	VkImageMemoryBarrier barrier;
+	VkBufferImageCopy region;
+	uint32_t slot;
+	int level;
+	qboolean eyeTracked;
+	qboolean changed;
+
+	if ( !vk.xr.foveationActive ) {
+		return;
+	}
+	if ( !vk.cmd || vk.cmd->command_buffer == VK_NULL_HANDLE ) {
+		return;
+	}
+
+	// TEMPORARY, remove before this branch ships.
+	//
+	// One image means every rebuild issues a queue-wide execution dependency
+	// from the rate-attachment read stage, so a rebuild costs frame N a wait on
+	// frame N-1's main pass. Fixed centers rebuild once and never again, which
+	// is why one image was chosen; gaze rebuilds whenever the center crosses a
+	// texel, and this map's texels are fine enough that a microsaccade can do
+	// it. Silence here means fixed mode pays nothing. A rate here in Plan B is
+	// what decides whether a second image is worth its framebuffer cross
+	// product. The renderer keeps no other per-second bookkeeping to hang this
+	// on, so the window lives here.
+	{
+		static int windowStart = 0;
+		const int now = ri.Milliseconds();
+
+		if ( windowStart == 0 ) {
+			windowStart = now;
+		} else if ( now - windowStart >= 1000 ) {
+			if ( vk.xr.shadingRateRebuilds != 0 ) {
+				ri.Printf( PRINT_ALL, "Foveation: %i map rebuilds/sec\n", vk.xr.shadingRateRebuilds );
+				vk.xr.shadingRateRebuilds = 0;
+			}
+			windowStart = now;
+		}
+	}
+
+	// The slot vk_begin_frame already waited on this frame, so the host write
+	// below cannot land in a buffer an earlier frame's copy is still reading
+	slot = (uint32_t)vk.cmd_index;
+	if ( vk.xr.shadingRateStagingMapped[slot] == NULL ) {
+		return;
+	}
+
+	level = vk.xr.foveationLevel;
+	eyeTracked = vk.xr.foveationEyeTracked;
+	// Off still needs a map, since the pass carries the attachment either way,
+	// and so does a template that could not be allocated
+	if ( level < 0 || vk.xr.shadingRateTemplate == NULL ) {
+		level = 0;
+	}
+
+	changed = ( !vk.xr.shadingRateUploaded ||
+		vk.xr.shadingRateAppliedLevel != level ||
+		vk.xr.shadingRateAppliedEyeTracked != eyeTracked ||
+		vk.xr.shadingRateAppliedSamples != vkSamples );
+
+	// Level 0 writes an all-1x1 map and never reads a center, so comparing
+	// offsets there would rebuild an identical map whenever a center jittered.
+	if ( !changed && level > 0 ) {
+		const uint32_t eyes = ( vk.xr.shadingRateLayers < 2 ) ? 1 : 2;
+		uint32_t eye;
+
+		for ( eye = 0; eye < eyes; eye++ ) {
+			uint32_t ox, oy;
+
+			vk_foveation_window_offset( vk.xr.foveationCenter[eye],
+				vk.xr.shadingRateWidth, vk.xr.shadingRateHeight, &ox, &oy );
+			if ( ox != vk.xr.shadingRateAppliedOffset[eye][0] ||
+				oy != vk.xr.shadingRateAppliedOffset[eye][1] ) {
+				changed = qtrue;
+				break;
+			}
+		}
+	}
+	if ( !changed ) {
+		return;
+	}
+
+	vk.xr.shadingRateRebuilds++;
+
+	if ( level == 0 ) {
+		// A rate byte is (log2 fragment width << 2) | log2 fragment height, so a
+		// zeroed map asks for 1x1 everywhere and nothing renders differently
+		Com_Memset( vk.xr.shadingRateStagingMapped[slot], 0,
+			(size_t)vk.xr.shadingRateWidth * vk.xr.shadingRateHeight * vk.xr.shadingRateLayers );
+	} else {
+		vk_write_shading_rate_texels( (byte*)vk.xr.shadingRateStagingMapped[slot],
+			vk.xr.shadingRateWidth, vk.xr.shadingRateHeight, vk.xr.shadingRateLayers,
+			level, eyeTracked, (VkSampleCountFlagBits)vkSamples,
+			(const float (*)[2])vk.xr.foveationCenter );
+	}
+
+	Com_Memset( &barrier, 0, sizeof( barrier ) );
+	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image = vk.xr.shadingRateImage;
+	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	barrier.subresourceRange.levelCount = 1;
+	barrier.subresourceRange.layerCount = vk.xr.shadingRateLayers;
+
+	// One image serves every frame in flight: this barrier's first synchronization
+	// scope covers every command submitted earlier in the queue, not just earlier
+	// commands in this buffer, so it orders the write against the previous frame's
+	// rate reads. UNDEFINED because nothing in the old contents is worth keeping.
+	barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	barrier.srcAccessMask = 0;
+	barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	qvkCmdPipelineBarrier( vk.cmd->command_buffer,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR, VK_PIPELINE_STAGE_TRANSFER_BIT,
+		0, 0, NULL, 0, NULL, 1, &barrier );
+
+	Com_Memset( &region, 0, sizeof( region ) );
+	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.imageSubresource.layerCount = vk.xr.shadingRateLayers;
+	region.imageExtent.width = vk.xr.shadingRateWidth;
+	region.imageExtent.height = vk.xr.shadingRateHeight;
+	region.imageExtent.depth = 1;
+	qvkCmdCopyBufferToImage( vk.cmd->command_buffer, vk.xr.shadingRateStaging[slot],
+		vk.xr.shadingRateImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region );
+
+	// The pass declares LOAD_OP_LOAD from the rate layout, so this is what makes
+	// the attachment legal to begin with
+	barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	barrier.newLayout = VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR;
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_FRAGMENT_SHADING_RATE_ATTACHMENT_READ_BIT_KHR;
+	qvkCmdPipelineBarrier( vk.cmd->command_buffer,
+		VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR,
+		0, 0, NULL, 0, NULL, 1, &barrier );
+
+	vk.xr.shadingRateUploaded = qtrue;
+	vk.xr.shadingRateAppliedLevel = level;
+	vk.xr.shadingRateAppliedEyeTracked = eyeTracked;
+	vk.xr.shadingRateAppliedSamples = vkSamples;
+	{
+		const uint32_t eyes = ( vk.xr.shadingRateLayers < 2 ) ? 1 : 2;
+		uint32_t eye;
+
+		for ( eye = 0; eye < eyes; eye++ ) {
+			vk_foveation_window_offset( vk.xr.foveationCenter[eye],
+				vk.xr.shadingRateWidth, vk.xr.shadingRateHeight,
+				&vk.xr.shadingRateAppliedOffset[eye][0], &vk.xr.shadingRateAppliedOffset[eye][1] );
+		}
+	}
+}
+
+
 void vk_begin_main_render_pass( void )
 {
 	VkRenderPassBeginInfo render_pass_begin_info;
@@ -8838,6 +9825,9 @@ void vk_begin_main_render_pass( void )
 		render_pass_begin_info.pClearValues = clear_values;
 		vk_world.dirty_depth_attachment = 0;
 	}
+
+	// Copies into an attachment this pass then loads, so it has to precede it
+	vk_update_shading_rate();
 
 	qvkCmdBeginRenderPass( vk.cmd->command_buffer, &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE );
 	vk.inRenderPass = qtrue;
@@ -9637,6 +10627,9 @@ void vk_end_frame( void )
 	extern cvar_t *vr_desktopMode;
 	VkCommandBuffer buffers[2];
 	uint32_t bufferCount = 0;
+	// r_foveationDebug: warn once when the tint is skipped for lack of a main
+	// pass, not every frame at render rate.
+	static qboolean tintSkippedPostMainWarned = qfalse;
 
 	if ( vk.frame_count == 0 && !vk.recordingCommands )
 		return;
@@ -9650,6 +10643,37 @@ void vk_end_frame( void )
 	if ( vk.geometry_buffer_size_new ) {
 		vk_resize_geometry_buffer();
 		return;
+	}
+
+	// Last thing inside the foveated pass. The post pass is not foveated, so a
+	// tint there would report 1x1 everywhere and show nothing.
+	if ( r_foveationDebug->integer && vk.xr.foveationActive && vk.inRenderPass &&
+		vk.renderPassIndex == RENDER_PASS_MAIN ) {
+		// Built on first enable: a debug view nobody has asked for should cost the
+		// binary its shader and nothing else. The first frame after enabling it
+		// hitches, which is the right trade for a cvar.
+		if ( vk.foveation_debug_pipeline == VK_NULL_HANDLE ) {
+			vk_create_foveation_debug_pipeline();
+		}
+		if ( vk.foveation_debug_pipeline != VK_NULL_HANDLE ) {
+			qvkCmdBindPipeline( vk.cmd->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+				vk.foveation_debug_pipeline );
+			qvkCmdDraw( vk.cmd->command_buffer, 4, 1, 0, 0 );
+			vk.cmd->last_pipeline = VK_NULL_HANDLE;
+		}
+		tintSkippedPostMainWarned = qfalse;
+	} else if ( r_foveationDebug->integer && vk.xr.foveationActive && vk.renderPassIndex != RENDER_PASS_MAIN ) {
+		// vk_bloom() already closed the main pass and moved to RENDER_PASS_POST_BLOOM
+		// by the time this runs, so the guard above declines silently; without this a
+		// user who enables the tint with bloom on sees an unchanged screen and cannot
+		// tell that from a broken rate map. Once per transition, not once per frame.
+		if ( !tintSkippedPostMainWarned ) {
+			ri.Printf( PRINT_WARNING, "Foveation: r_foveationDebug needs r_bloom 0 in the FBO path; "
+				"the post-bloom pass carries no rate attachment\n" );
+			tintSkippedPostMainWarned = qtrue;
+		}
+	} else {
+		tintSkippedPostMainWarned = qfalse;
 	}
 
 	colorIndex = vk.xr.colorIndex;
@@ -12155,7 +13179,7 @@ qboolean vk_create_xr_framebuffers( void )
 	// Per-eye framebuffers for desktop mirror not implemented (VR-only app)
 
 	if ( !vk.fboActive ) {
-		VkImageView directAttachments[3]; // swapchain | depth | transient msaa color
+		VkImageView directAttachments[4]; // swapchain | depth | transient msaa color | shading rate
 		uint32_t attachmentCount;
 
 		if ( vk.render_pass.main == VK_NULL_HANDLE ) {
@@ -12181,6 +13205,10 @@ qboolean vk_create_xr_framebuffers( void )
 			} else {
 				directAttachments[1] = xr->xrDepthView;
 				attachmentCount = 2;
+			}
+
+			if ( vk.xr.foveationActive ) {
+				directAttachments[attachmentCount++] = vk.xr.shadingRateView;
 			}
 
 			Com_Memset( &fbInfo, 0, sizeof( fbInfo ) );
@@ -14278,8 +15306,9 @@ static qboolean vk_recreate_xr_render_pass( VkFormat colorFormat, VkFormat depth
 		ri.Printf( PRINT_ALL, "Created virtual screen render pass\n" );
 	}
 
-	// Invalidate all pipelines created for RENDER_PASS_MAIN since render pass was recreated
-	// They will be lazily recreated with the new render pass on next use
+	// Invalidate all pipelines created for RENDER_PASS_MAIN and RENDER_PASS_MAIN_2D,
+	// since both were built against vk.render_pass.main and it was just recreated.
+	// They will be lazily recreated with the new render pass on next use.
 	{
 		uint32_t i, invalidated = 0;
 		for ( i = 0; i < vk.pipelines_count; i++ ) {
@@ -14288,8 +15317,13 @@ static qboolean vk_recreate_xr_render_pass( VkFormat colorFormat, VkFormat depth
 				vk.pipelines[i].handle[RENDER_PASS_MAIN] = VK_NULL_HANDLE;
 				invalidated++;
 			}
+			if ( vk.pipelines[i].handle[RENDER_PASS_MAIN_2D] != VK_NULL_HANDLE ) {
+				qvkDestroyPipeline( vk.device, vk.pipelines[i].handle[RENDER_PASS_MAIN_2D], NULL );
+				vk.pipelines[i].handle[RENDER_PASS_MAIN_2D] = VK_NULL_HANDLE;
+				invalidated++;
+			}
 		}
-		ri.Printf( PRINT_ALL, "Invalidated %u pipelines for RENDER_PASS_MAIN\n", invalidated );
+		ri.Printf( PRINT_ALL, "Invalidated %u pipelines for the main render pass\n", invalidated );
 	}
 
 	// The framebuffers were built against the initial render passes and must
@@ -14350,11 +15384,18 @@ qboolean vk_init_xr_resources( void )
 	ri.Printf( PRINT_ALL, "XR color swapchain info: %ux%u (%u images)\n",
 		xrInfo->colorWidth, xrInfo->colorHeight, xrInfo->colorImageCount );
 
+	// Before the render pass, because vk_recreate_xr_render_pass both declares the
+	// main pass and rebuilds the FBO framebuffers, and vk_create_xr_framebuffers
+	// below builds the direct ones: all three read vk.xr.foveationActive, so the
+	// map has to exist before the first of them or the sides disagree
+	vk_create_shading_rate_image( xrInfo->colorWidth, xrInfo->colorHeight, xrInfo->colorArraySize );
+
 	// Recreate main render pass with correct XR swapchain formats
 	// The initial render pass was created with desktop swapchain format which may differ
 	// Use vk.depth_format for depth (native buffer) instead of XR-provided format
 	if ( !vk_recreate_xr_render_pass( xrInfo->colorFormat, vk.depth_format ) ) {
 		ri.Printf( PRINT_WARNING, "vk_init_xr_resources: Failed to recreate XR render pass\n" );
+		vk_destroy_shading_rate_image();
 		return qfalse;
 	}
 
@@ -14441,6 +15482,7 @@ void vk_shutdown_xr_resources( void )
 	vk_destroy_hud_buffer();
 	vk_destroy_xr_framebuffers();
 	vk_destroy_direct_transient_images();  // Built here too, from vk_init_xr_resources
+	vk_destroy_shading_rate_image();       // Likewise, and clears foveationActive
 	vk_destroy_xr_native_depth();  // Native depth buffer (replaces XR depth swapchain)
 	vk_destroy_xr_image_views();
 
