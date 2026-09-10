@@ -9249,17 +9249,17 @@ static void vk_foveation_level_angles( int level, qboolean eyeTracked, float *sh
 {
 	if ( eyeTracked ) {
 		switch ( level ) {
-			case VR_FOVEATION_STRENGTH_LOW:    *sharpDeg = 20.0f; *coarseDeg = 40.0f; break;
-			case VR_FOVEATION_STRENGTH_MEDIUM: *sharpDeg = 16.0f; *coarseDeg = 34.0f; break;
-			default:                           *sharpDeg = 12.0f; *coarseDeg = 28.0f; break;
+			case VR_FOVEATION_STRENGTH_LOW:    *sharpDeg = 20.0f; *coarseDeg = 33.0f; break;
+			case VR_FOVEATION_STRENGTH_MEDIUM: *sharpDeg = 16.0f; *coarseDeg = 27.0f; break;
+			default:                           *sharpDeg = 12.0f; *coarseDeg = 21.0f; break;
 		}
 		return;
 	}
 
 	switch ( level ) {
-		case VR_FOVEATION_STRENGTH_LOW:    *sharpDeg = 30.0f; *coarseDeg = 48.0f; break;
-		case VR_FOVEATION_STRENGTH_MEDIUM: *sharpDeg = 25.0f; *coarseDeg = 42.0f; break;
-		default:                           *sharpDeg = 22.0f; *coarseDeg = 35.0f; break;
+		case VR_FOVEATION_STRENGTH_LOW:    *sharpDeg = 30.0f; *coarseDeg = 41.0f; break;
+		case VR_FOVEATION_STRENGTH_MEDIUM: *sharpDeg = 25.0f; *coarseDeg = 35.0f; break;
+		default:                           *sharpDeg = 22.0f; *coarseDeg = 28.0f; break;
 	}
 }
 
