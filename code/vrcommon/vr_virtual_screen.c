@@ -203,15 +203,9 @@ Create model matrix for the virtual screen mesh.
 */
 void VR_VirtualScreen_GetModelMatrix(XrMatrix4x4f* model, const XrPosef* centeredHead)
 {
-	// Base 4:3 aspect ratio for the virtual screen content
-	float aspectRatioCoeff = 3.0f / 4.0f;
-
-	// Compensate for non-square framebuffer aspect ratio
-	if (vr.fov_x > 0.0f && vr.fov_y > 0.0f)
-	{
-		float framebufferAspect = vr.fov_y / vr.fov_x;
-		aspectRatioCoeff *= framebufferAspect;
-	}
+	// The crop is 4:3 in both pixels and angle (see vk_set_view_eyeproj);
+	// the eye-buffer aspect would stretch the screen by that aspect
+	const float aspectRatioCoeff = 3.0f / 4.0f;
 
 	XrVector3f translation;
 	XrQuaternionf rotation;

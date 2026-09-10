@@ -7429,9 +7429,8 @@ void vk_set_view_eyeproj( void )
 				float cropFactor = (float)glConfig.vidHeight / cropHeight;
 				proj[0] = ( 1.0f / tan( DEG2RAD( backEnd.viewParms.fovX ) * 0.5f ) ) / cropFactor;
 				proj[5] = ( -1.0f / tan( DEG2RAD( backEnd.viewParms.fovY ) * 0.5f ) ) / cropFactor;
-			} else if ( vr.weapon_zoomed ) {
-				proj[5] *= (float)glConfig.vidWidth / (float)glConfig.vidHeight;
-			} else {
+			} else if ( !vr.weapon_zoomed ) {
+				// Virtual screen: 4:3 crop. The scope projection already matches the buffer.
 				proj[5] *= (float)glConfig.vidHeight / (float)glConfig.vidWidth;
 			}
 			proj[8] = 0.0f;
@@ -7442,6 +7441,63 @@ void vk_set_view_eyeproj( void )
 
 		Com_Memcpy( vk_view_eyeproj[0], proj, sizeof( proj ) );
 		Com_Memcpy( vk_view_eyeproj[1], proj, sizeof( proj ) );
+	}
+}
+
+
+/*
+==================
+vk_hud_eye_matrix
+
+The 2D overlay as one plane in front of the head, seen through one eye: clip
+x/y back through the eye projection to a head-space direction, into the eye's
+frame by the display's cant, and projected again. A clip-space translation
+fuses only the overlay's center: with cant the eyes see the plane through
+frames turned apart, so off-axis points land at different angles in each and
+the corners double. Depth stays the overlay's own; the convergence shift goes
+on last, in clip x.
+==================
+*/
+static void vk_hud_eye_matrix( int eye, float depth, float xShift, float *out )
+{
+	const float *P = tr.vrParms.projectionEye[eye];
+	const vrQuaternionf_t *q = &vr.eyeLocalRotation[eye];
+	float toHead[16], toEye[16], tmp[16];
+	float R[3][3];
+	int c;
+
+	// Clip x/y back to a head-space direction at unit distance
+	Com_Memset( toHead, 0, sizeof( toHead ) );
+	toHead[0] = 1.0f / P[0];
+	toHead[5] = 1.0f / P[5];
+	toHead[13] = P[9] / P[5];
+	toHead[14] = -1.0f;
+	toHead[15] = 1.0f;
+
+	// Transpose of the eye's rotation in the head: head-space direction into the eye's frame
+	R[0][0] = 1.0f - 2.0f * ( q->y * q->y + q->z * q->z );
+	R[0][1] = 2.0f * ( q->x * q->y - q->z * q->w );
+	R[0][2] = 2.0f * ( q->x * q->z + q->y * q->w );
+	R[1][0] = 2.0f * ( q->x * q->y + q->z * q->w );
+	R[1][1] = 1.0f - 2.0f * ( q->x * q->x + q->z * q->z );
+	R[1][2] = 2.0f * ( q->y * q->z - q->x * q->w );
+	R[2][0] = 2.0f * ( q->x * q->z - q->y * q->w );
+	R[2][1] = 2.0f * ( q->y * q->z + q->x * q->w );
+	R[2][2] = 1.0f - 2.0f * ( q->x * q->x + q->y * q->y );
+	Com_Memset( toEye, 0, sizeof( toEye ) );
+	for ( c = 0; c < 3; c++ ) {
+		toEye[c * 4 + 0] = R[c][0];
+		toEye[c * 4 + 1] = R[c][1];
+		toEye[c * 4 + 2] = R[c][2];
+	}
+	toEye[15] = 1.0f;
+
+	myGlMultMatrix( toHead, toEye, tmp );  // tmp = toEye * toHead
+	myGlMultMatrix( tmp, P, out );         // out = P * toEye * toHead
+
+	for ( c = 0; c < 4; c++ ) {
+		out[c * 4 + 2] = depth * out[c * 4 + 3];
+		out[c * 4 + 0] += xShift * out[c * 4 + 3];
 	}
 }
 
@@ -7467,14 +7523,10 @@ void vk_update_mvp( const float *m ) {
 		float mvp0 = 2.0f * hudScale / vk.renderWidth;
 		float mvp5 = 2.0f * hudScale / vk.renderHeight;
 
-		float asymmetryOffsetX[2] = { 0.0f, 0.0f };
-		float asymmetryOffsetY = 0.0f;
 		qboolean isHudMode1 = ( backEnd.isDrawingHUD && hudStatus == 1 );
-		if ( tr.vrParms.valid && !isVirtualScreen && !isHudMode1 && !vr.weapon_zoomed ) {
-			asymmetryOffsetX[0] = tr.vrParms.projectionEye[0][8];
-			asymmetryOffsetX[1] = tr.vrParms.projectionEye[1][8];
-			asymmetryOffsetY = tr.vrParms.projectionEye[0][9];
-		}
+		// Per-eye overlay placement through each eye's projection and cant (vk_hud_eye_matrix)
+		qboolean perEye = ( tr.vrParms.valid && !isVirtualScreen && !isHudMode1 && !vr.weapon_zoomed );
+		float asymmetryOffsetY = perEye ? tr.vrParms.projectionEye[0][9] : 0.0f;
 
 		float depthOffset = 0.0f;
 		if ( backEnd.isDrawingHUD && hudStatus == 2 && !vr.first_person_following && !vr.weapon_zoomed ) {
@@ -7503,14 +7555,19 @@ void vk_update_mvp( const float *m ) {
 #endif
 		push_constants[15] = 1.0f;
 
-		// Per-eye part -> view slot (pure clip-space translation)
+		// Per-eye part -> view slot: the plane through each eye, or the convergence shift alone
 		Com_Memset( vk_view_eyeproj, 0, sizeof( vk_view_eyeproj ) );
 		for ( int e = 0; e < 2; e++ ) {
-			vk_view_eyeproj[e][0] = vk_view_eyeproj[e][5] =
-			vk_view_eyeproj[e][10] = vk_view_eyeproj[e][15] = 1.0f;
+			const float xShift = e ? -depthOffset : depthOffset;
+
+			if ( perEye ) {
+				vk_hud_eye_matrix( e, push_constants[14], xShift, vk_view_eyeproj[e] );
+			} else {
+				vk_view_eyeproj[e][0] = vk_view_eyeproj[e][5] =
+				vk_view_eyeproj[e][10] = vk_view_eyeproj[e][15] = 1.0f;
+				vk_view_eyeproj[e][12] = xShift;
+			}
 		}
-		vk_view_eyeproj[0][12] = -asymmetryOffsetX[0] + depthOffset;
-		vk_view_eyeproj[1][12] = -asymmetryOffsetX[1] - depthOffset;
 		VK_PushEyeProj();
 	} else if ( m ) {
 		// Explicit modelview (shadows, flares): eyeProj already set per view.

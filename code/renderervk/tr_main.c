@@ -414,6 +414,84 @@ void R_RotateForEntity( const trRefEntity_t *ent, const viewParms_t *viewParms,
 
 /*
 =================
+R_QuatRotate
+
+v' = q v q^-1 for a unit quaternion (x, y, z, w).
+=================
+*/
+static void R_QuatRotate( const vrQuaternionf_t *q, const vec3_t v, vec3_t out )
+{
+	vec3_t qv, t, c;
+
+	VectorSet( qv, q->x, q->y, q->z );
+	CrossProduct( qv, v, t );
+	VectorScale( t, 2.0f, t );
+	CrossProduct( qv, t, c );
+	out[0] = v[0] + q->w * t[0] + c[0];
+	out[1] = v[1] + q->w * t[1] + c[1];
+	out[2] = v[2] + q->w * t[2] + c[2];
+}
+
+/*
+=================
+R_RotateAxesForEye
+
+Rotate the view axes by an eye's rotation q, given in OpenXR head-local axes
+(x=right, y=up, z=back): right=-axis[1], up=axis[2], back=-axis[0].
+=================
+*/
+static void R_RotateAxesForEye( vec3_t const in[3], const vrQuaternionf_t *q, vec3_t out[3] )
+{
+	static const vec3_t localForward = { 0.0f, 0.0f, -1.0f };
+	static const vec3_t localLeft = { -1.0f, 0.0f, 0.0f };
+	static const vec3_t localUp = { 0.0f, 1.0f, 0.0f };
+	const float *locals[3] = { localForward, localLeft, localUp };
+	int k;
+
+	for ( k = 0; k < 3; k++ ) {
+		vec3_t r;
+		R_QuatRotate( q, locals[k], r );
+		// world = x*right + y*up + z*back
+		out[k][0] = -r[0] * in[1][0] + r[1] * in[2][0] - r[2] * in[0][0];
+		out[k][1] = -r[0] * in[1][1] + r[1] * in[2][1] - r[2] * in[0][1];
+		out[k][2] = -r[0] * in[1][2] + r[1] * in[2][2] - r[2] * in[0][2];
+	}
+}
+
+/*
+=================
+R_EyeOrientation
+
+The view's origin and axes with the eye's offset and, on canted displays, its
+rotation applied. Shared by the eye view matrices and the portal plane, which must agree.
+=================
+*/
+static void R_EyeOrientation( const viewParms_t *parms, int eye, vec3_t origin, vec3_t axis[3] )
+{
+	VectorCopy( parms->or.origin, origin );
+	VectorCopy( parms->or.axis[0], axis[0] );
+	VectorCopy( parms->or.axis[1], axis[1] );
+	VectorCopy( parms->or.axis[2], axis[2] );
+
+	if ( eye < 2 && !ri.VR_ShouldDisableStereo() ) {
+		// eye offset in head-local meters (OpenXR axes: x=right, y=up, z=back)
+		const float worldscale = vr_worldscale->value * vr_worldscaleScaler->value;
+		const float localX = vr.eyeLocalOffset[eye].x * worldscale;
+		const float localY = vr.eyeLocalOffset[eye].y * worldscale;
+		const float localZ = vr.eyeLocalOffset[eye].z * worldscale;
+
+		// Quake view axes: axis[0]=forward, axis[1]=left, axis[2]=up
+		VectorMA( origin, -localX, parms->or.axis[1], origin );  // local right = -Quake left
+		VectorMA( origin, localY, parms->or.axis[2], origin );   // local up = Quake up
+		VectorMA( origin, -localZ, parms->or.axis[0], origin );  // local back = -Quake forward
+
+		// identity on Quest, +/- the cant on canted displays
+		R_RotateAxesForEye( parms->or.axis, &vr.eyeLocalRotation[eye], axis );
+	}
+}
+
+/*
+=================
 R_RotateForViewer
 
 Sets up the modelview matrix for a given viewParm.
@@ -438,55 +516,7 @@ static void R_RotateForViewer( void )
 		vec3_t	origin;
 		vec3_t	axis[3];
 
-		VectorCopy(tr.viewParms.or.origin, origin);
-		VectorCopy(tr.viewParms.or.axis[0], axis[0]);
-		VectorCopy(tr.viewParms.or.axis[1], axis[1]);
-		VectorCopy(tr.viewParms.or.axis[2], axis[2]);
-
-		if ((eye < 2) && !ri.VR_ShouldDisableStereo())
-		{
-			// Apply stereo eye offset for IPD
-			// The eye offset must be in HEAD-LOCAL space, not world space.
-			// OpenXR eyePose positions are in world/stage space, so when the head rotates,
-			// the world-space difference between eye and HMD center rotates too.
-			// We need to un-rotate this to get head-local offset, then apply along view axes.
-
-			// World-space difference (in meters)
-			float worldDiffX = vr.eyePose[eye].position.x - vr.hmdposition[0];
-			float worldDiffY = vr.eyePose[eye].position.y - vr.hmdposition[1];
-			float worldDiffZ = vr.eyePose[eye].position.z - vr.hmdposition[2];
-
-			// Un-rotate by HMD orientation to get head-local offset
-			// Using quaternion inverse rotation: q* v q^-1
-			// For unit quaternion, q^-1 = conjugate = (-x, -y, -z, w)
-			float qx = -vr.eyePose[eye].orientation.x;
-			float qy = -vr.eyePose[eye].orientation.y;
-			float qz = -vr.eyePose[eye].orientation.z;
-			float qw = vr.eyePose[eye].orientation.w;
-
-			// Rotate world diff by inverse quaternion to get head-local offset
-			// v' = q * v * q^-1, using the formula for quaternion-vector rotation
-			float tx = 2.0f * (qy * worldDiffZ - qz * worldDiffY);
-			float ty = 2.0f * (qz * worldDiffX - qx * worldDiffZ);
-			float tz = 2.0f * (qx * worldDiffY - qy * worldDiffX);
-
-			float localX = worldDiffX + qw * tx + (qy * tz - qz * ty);
-			float localY = worldDiffY + qw * ty + (qz * tx - qx * tz);
-			float localZ = worldDiffZ + qw * tz + (qx * ty - qy * tx);
-
-			// Scale to Quake units
-			float worldscale = vr_worldscale->value * vr_worldscaleScaler->value;
-			localX *= worldscale;
-			localY *= worldscale;
-			localZ *= worldscale;
-
-			// Apply head-local offset along view axes
-			// OpenXR head-local: X=right, Y=up, Z=back
-			// Quake view axes: axis[0]=forward, axis[1]=left, axis[2]=up
-			VectorMA(origin, -localX, tr.viewParms.or.axis[1], origin);  // local right = -Quake left
-			VectorMA(origin, localY, tr.viewParms.or.axis[2], origin);   // local up = Quake up
-			VectorMA(origin, -localZ, tr.viewParms.or.axis[0], origin);  // local back = -Quake forward
-		}
+		R_EyeOrientation( &tr.viewParms, eye, origin, axis );
 
 		viewerMatrix[0] = axis[0][0];
 		viewerMatrix[4] = axis[0][1];
@@ -755,16 +785,27 @@ static void R_SetupProjectionZ( viewParms_t *dest )
 				float stdM14 = tr.vrParms.projectionEye[eye][14];
 #endif
 
+				// The plane in this eye's own view space: for an offset, canted eye the
+				// mono plane sits a few degrees off and clipped a wedge off the mirror
+				vec3_t eyeOrigin, eyeAxis[3];
+				float eyePlane[4];
+
+				R_EyeOrientation( dest, eye, eyeOrigin, eyeAxis );
+				eyePlane[0] = -DotProduct( eyeAxis[1], plane );
+				eyePlane[1] =  DotProduct( eyeAxis[2], plane );
+				eyePlane[2] = -DotProduct( eyeAxis[0], plane );
+				eyePlane[3] =  DotProduct( plane, eyeOrigin ) - plane[3];
+
 				// Compute per-eye oblique clipping using standard depth values
-				q[0] = (SGN(plane2[0]) + tr.vrParms.projectionEye[eye][8]) / tr.vrParms.projectionEye[eye][0];
-				q[1] = (SGN(plane2[1]) + tr.vrParms.projectionEye[eye][9]) / tr.vrParms.projectionEye[eye][5];
+				q[0] = (SGN(eyePlane[0]) + tr.vrParms.projectionEye[eye][8]) / tr.vrParms.projectionEye[eye][0];
+				q[1] = (SGN(eyePlane[1]) + tr.vrParms.projectionEye[eye][9]) / tr.vrParms.projectionEye[eye][5];
 				q[2] = -1.0f;
 #ifdef USE_VULKAN
 				q[3] = - stdM10 / stdM14;
 #else
 				q[3] = (1.0f + stdM10) / stdM14;
 #endif
-				VectorScale4( plane2, 2.0f / DotProduct4(plane2, q), c );
+				VectorScale4( eyePlane, 2.0f / DotProduct4(eyePlane, q), c );
 
 				tr.vrParms.mirrorProjectionEye[eye][2]  = c[0];
 				tr.vrParms.mirrorProjectionEye[eye][6]  = c[1];
@@ -1072,6 +1113,9 @@ static qboolean SurfIsOffscreen( const drawSurf_t *drawSurf, qboolean *isMirror 
 	vec4_t clip, eye;
 	int i;
 	unsigned int pointAnd = (unsigned int)~0;
+	// the eyes see past the mono frustum, by the cant on canted displays: reject only when both miss
+	unsigned int pointAndEye[2] = { (unsigned int)~0, (unsigned int)~0 };
+	const qboolean stereo = tr.vrParms.valid && !ri.VR_ShouldDisableStereo();
 
 	*isMirror = qfalse;
 
@@ -1106,10 +1150,34 @@ static qboolean SurfIsOffscreen( const drawSurf_t *drawSurf, qboolean *isMirror 
 			}
 		}
 		pointAnd &= pointFlags;
+
+		if ( stereo )
+		{
+			int e;
+
+			for ( e = 0; e < 2; e++ )
+			{
+				unsigned int eyeFlags = 0;
+
+				R_TransformModelToClip( tess.xyz[i], tr.or.eyeViewMatrix[e], tr.vrParms.projectionEye[e], eye, clip );
+				for ( j = 0; j < 3; j++ )
+				{
+					if ( clip[j] >= clip[3] )
+					{
+						eyeFlags |= (1 << (j*2));
+					}
+					else if ( clip[j] <= -clip[3] )
+					{
+						eyeFlags |= ( 1 << (j*2+1));
+					}
+				}
+				pointAndEye[e] &= eyeFlags;
+			}
+		}
 	}
 
 	// trivially reject
-	if ( pointAnd )
+	if ( stereo ? ( pointAndEye[0] && pointAndEye[1] ) : pointAnd )
 	{
 		tess.numIndexes = 0;
 		return qtrue;

@@ -72,6 +72,10 @@ typedef struct vr_clientinfo_s {
 	vec3_t hmdposition;
 	vec3_t hmdposition_eye[2]; //per-eye positions from OpenXR (in HMD/VR space, not Quake space)
 	vrPosef_t eyePose[2]; // Raw OpenXR per-eye poses for direct view matrix construction
+	// Per-eye pose relative to the center pose, in OpenXR head-local axes (x=right, y=up, z=back)
+	vrVector3f_t eyeLocalOffset[2]; // meters
+	vrQuaternionf_t eyeLocalRotation[2]; // identity on Quest, +/- the cant angle on canted displays
+	float eyeCantYaw[2]; // signed yaw of eyeLocalRotation in radians; widens the culling frustum
 	vec3_t hmdorigin; //used to recenter the mp 6DoF playspace
 	vec3_t hmdposition_delta;
 

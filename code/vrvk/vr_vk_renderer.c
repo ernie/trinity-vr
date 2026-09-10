@@ -36,7 +36,7 @@ extern cvar_t *vr_heightAdjust;
 extern cvar_t *vr_refreshrate;
 extern cvar_t *vr_desktopMode;
 
-// This file owns the per-frame VR state; views/viewCount stay external because vr_vk_virtual_screen.c reads them.
+// This file owns the renderer's VR state; views/viewCount stay external because vr_vk_virtual_screen.c reads them.
 static const float hudScale = M_PI * 15.0f / 180.0f;
 
 static XrBool32 stageSupported = XR_FALSE;
@@ -277,13 +277,27 @@ static void VR_Renderer_BeginFrame(VR_Engine* engine, XrBool32 needsRecenter)
 
 	XrMatrix4x4f vrMatrixMono, vrMatrixProjection;
 	const XrFovf monoFov = { -hudScale, hudScale, hudScale, -hudScale };
-	const XrFovf projectionFov =
+	XrFovf projectionFov;
+	if (vr.weapon_zoomed)
 	{
-		fov.angleLeft / vr.weapon_zoomLevel,
-		fov.angleRight / vr.weapon_zoomLevel,
-		fov.angleUp / vr.weapon_zoomLevel,
-		fov.angleDown / vr.weapon_zoomLevel,
-	};
+		// Scope: the view the quad in VR_EndFrame shows, from the same frustum.
+		// Zoom narrows the angle; the height keeps the buffer aspect
+		float halfTanH, halfTanV;
+		VR_ScopeFrustum(&halfTanH, &halfTanV, swapchains->color.width, swapchains->color.height);
+		float tanH = tanf(atanf(halfTanH) / vr.weapon_zoomLevel);
+		float tanV = tanH * (float)swapchains->color.height / (float)swapchains->color.width;
+		projectionFov.angleLeft = -atanf(tanH);
+		projectionFov.angleRight = atanf(tanH);
+		projectionFov.angleUp = atanf(tanV);
+		projectionFov.angleDown = -atanf(tanV);
+	}
+	else
+	{
+		projectionFov.angleLeft = fov.angleLeft / vr.weapon_zoomLevel;
+		projectionFov.angleRight = fov.angleRight / vr.weapon_zoomLevel;
+		projectionFov.angleUp = fov.angleUp / vr.weapon_zoomLevel;
+		projectionFov.angleDown = fov.angleDown / vr.weapon_zoomLevel;
+	}
 	XrMatrix4x4f_CreateProjectionFov(&vrMatrixMono, graphicsApi, monoFov, nearPlane, 0.0f);
 	XrMatrix4x4f_CreateProjectionFov(&vrMatrixProjection, graphicsApi, projectionFov, nearPlane, 0.0f);
 
@@ -310,6 +324,16 @@ static void VR_Renderer_BeginFrame(VR_Engine* engine, XrBool32 needsRecenter)
 	float combinedAngleLeft = views[0].fov.angleLeft / vr.weapon_zoomLevel;
 	float combinedAngleRight = views[1].fov.angleRight / vr.weapon_zoomLevel;
 	float combinedFovX = (fabsf(combinedAngleLeft) + fabsf(combinedAngleRight)) * 180.0f / M_PI;
+	// Canted displays: each eye's FOV is centered on its own yawed axis
+	combinedFovX += (fabsf(vr.eyeCantYaw[0]) + fabsf(vr.eyeCantYaw[1])) * 180.0f / M_PI;
+
+	if (vr.weapon_zoomed)
+	{
+		// Cull to whichever is wider, the eyes or the scope's fixed frustum
+		float scopeFovX = 2.0f * projectionFov.angleRight * 180.0f / M_PI;
+		if (scopeFovX > combinedFovX)
+			combinedFovX = scopeFovX;
+	}
 
 	// Calculate half-IPD in meters for frustum plane offset
 	float halfIpdMeters = 0.0f;

@@ -2274,6 +2274,64 @@ void IN_VRUpdateHMD( XrView* views, uint32_t viewCount, XrFovf* fov )
 		vr.eyePose[eye].position.z = views[eye].pose.position.z;
 	}
 
+	// Per-eye pose in head-local axes; canted displays yaw each eye by the cant angle, Quest reports identity
+	for (uint32_t eye = 0; eye < 2; eye++)
+	{
+		vr.eyeLocalOffset[eye].x = vr.eyeLocalOffset[eye].y = vr.eyeLocalOffset[eye].z = 0.0f;
+		vr.eyeLocalRotation[eye].x = vr.eyeLocalRotation[eye].y = vr.eyeLocalRotation[eye].z = 0.0f;
+		vr.eyeLocalRotation[eye].w = 1.0f;
+		vr.eyeCantYaw[eye] = 0.0f;
+	}
+	if (viewCount == 2)
+	{
+		XrQuaternionf centerInv;
+		XrQuaternionf_Invert(&centerInv, &hmdRotation);
+		for (uint32_t eye = 0; eye < 2; eye++)
+		{
+			const XrVector3f worldDiff = {
+				views[eye].pose.position.x - hmdPosition.x,
+				views[eye].pose.position.y - hmdPosition.y,
+				views[eye].pose.position.z - hmdPosition.z };
+			XrVector3f local;
+			XrQuaternionf_RotateVector3f(&local, &centerInv, &worldDiff);
+			vr.eyeLocalOffset[eye].x = local.x;
+			vr.eyeLocalOffset[eye].y = local.y;
+			vr.eyeLocalOffset[eye].z = local.z;
+
+			// rel = centerInv * eye (apply eye first, then centerInv): eye-local -> center-local
+			XrQuaternionf rel;
+			XrQuaternionf_Multiply(&rel, &views[eye].pose.orientation, &centerInv);
+			XrQuaternionf_Normalize(&rel);
+			vr.eyeLocalRotation[eye].x = rel.x;
+			vr.eyeLocalRotation[eye].y = rel.y;
+			vr.eyeLocalRotation[eye].z = rel.z;
+			vr.eyeLocalRotation[eye].w = rel.w;
+
+			// Yaw about head-local +Y: where the eye's forward (0,0,-1) ends up
+			const XrVector3f localForward = { 0.0f, 0.0f, -1.0f };
+			XrVector3f f;
+			XrQuaternionf_RotateVector3f(&f, &rel, &localForward);
+			vr.eyeCantYaw[eye] = atan2f(-f.x, -f.z);
+		}
+
+		static qboolean eyeGeometryLogged = qfalse;
+		if (!eyeGeometryLogged)
+		{
+			eyeGeometryLogged = qtrue;
+			for (uint32_t eye = 0; eye < 2; eye++)
+			{
+				Com_Printf("VR eye %u: offset (%.4f, %.4f, %.4f) m  cant yaw %.2f deg  fov L %.1f R %.1f U %.1f D %.1f deg  quat (%.4f, %.4f, %.4f, %.4f)\n",
+					eye,
+					vr.eyeLocalOffset[eye].x, vr.eyeLocalOffset[eye].y, vr.eyeLocalOffset[eye].z,
+					vr.eyeCantYaw[eye] * 180.0f / M_PI,
+					views[eye].fov.angleLeft * 180.0f / M_PI, views[eye].fov.angleRight * 180.0f / M_PI,
+					views[eye].fov.angleUp * 180.0f / M_PI, views[eye].fov.angleDown * 180.0f / M_PI,
+					views[eye].pose.orientation.x, views[eye].pose.orientation.y,
+					views[eye].pose.orientation.z, views[eye].pose.orientation.w);
+			}
+		}
+	}
+
 	// Debug logging removed - consolidated in vr_renderer.c
 
 	//Position delta

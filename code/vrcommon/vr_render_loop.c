@@ -5,6 +5,7 @@
 
 #include "vr_macros.h"
 #include "vr_clientinfo.h"
+#include "vr_gameplay.h"
 #include "../vrvk/vr_vk_types.h"
 #include "common/xr_linear.h"
 
@@ -169,11 +170,14 @@ void VR_EndFrame(XrSession session, VR_SwapchainInfos* swapchains, XrView* views
 		quad_layer.subImage.imageArrayIndex = 0;  // both array layers carry identical cyclopean pixels
 
 		quad_layer.pose.orientation.w = 1.0f;
-		quad_layer.pose.position.z = -1.0f;
+		quad_layer.pose.position.z = -VR_SCOPE_QUAD_DISTANCE;
 
-		// Aspect-match to texture so reticle stays circular.
-		quad_layer.size.height = 2.0f;
-		quad_layer.size.width = 2.0f * (float)colorWidth / (float)colorHeight;
+		// The buffer's zoom-1 frustum at its true angles, the same width on
+		// every headset (VR_ScopeFrustum)
+		float halfTanH, halfTanV;
+		VR_ScopeFrustum(&halfTanH, &halfTanV, colorWidth, colorHeight);
+		quad_layer.size.width = 2.0f * halfTanH * VR_SCOPE_QUAD_DISTANCE;
+		quad_layer.size.height = 2.0f * halfTanV * VR_SCOPE_QUAD_DISTANCE;
 
 		const XrCompositionLayerBaseHeader* layers[1] = {
 			(const XrCompositionLayerBaseHeader*)&quad_layer,
