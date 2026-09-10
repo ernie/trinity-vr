@@ -783,13 +783,18 @@ static void vk_fill_render_pass_dependencies( VkSubpassDependency deps[2] )
 	Com_Memset( deps, 0, sizeof( VkSubpassDependency ) * 2 );
 
 	// External -> subpass 0. Includes depth stages so an earlier frame's depth
-	// work finishes before this pass clears
+	// work finishes before this pass clears. Both fragment-test stages on the
+	// destination side: a second view in the same frame clears depth mid-pass
+	// through vkCmdClearAttachments, which writes in the late stage as well as
+	// the early one, and naming only the early one leaves that clear unordered
+	// against the layout transition ahead of the pass
 	deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
 	deps[0].dstSubpass = 0;
 	deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
 	                        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
 	deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-	                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+	                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+	                        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
 	deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT |
 	                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 	deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
@@ -1507,12 +1512,17 @@ static void vk_create_render_passes( void )
 		// depth image is one image shared by every frame slot, so this pass's
 		// depth clear has to be ordered against the late fragment tests of the
 		// slot before it, which is what the outgoing leg's source scope names.
+		// The destination names both fragment-test stages for the same reason
+		// the main pass does: a 3D model drawn into the HUD buffer takes the
+		// view path and clears depth mid-pass, which writes in the late stage.
 		hudDeps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
 		hudDeps[0].dstSubpass = 0;
 		hudDeps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
 		                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
 		                          VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-		hudDeps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+		hudDeps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+		                          VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+		                          VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
 		hudDeps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT |
 		                           VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
 		                           VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
