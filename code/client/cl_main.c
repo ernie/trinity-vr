@@ -34,17 +34,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "../vrcommon/vr_cvars.h"
 #include "../vrcommon/vr_clientinfo.h"
 #include "../vrcommon/vr_gameplay.h"
-#include "../vrcommon/vr_backend.h"
 #include "../vrcommon/vr_base.h"
 #include "../renderercommon/tr_common.h"
 
 extern vr_clientinfo_t vr;
-
-// Backend accessors (implemented in vrvk/vr_vk.c and vrgl2/vr_gl.c). Declared
-// here rather than including both backend headers, whose type headers define a
-// conflicting VR_SwapchainInfos_s tag and cannot coexist in one TU.
-const vr_backend_t* VRVK_GetBackend( void );
-const vr_backend_t* VRGL_GetBackend( void );
 
 // VR Vulkan accessors and platform functions, implemented in vrvk/vr_vk.c and
 // sdl/sdl_glimp.c (both compiled into the client).
@@ -3076,27 +3069,6 @@ int CL_ScaledMilliseconds(void) {
 
 /*
 ============
-Platform wrapper functions for Quake3e-style refimport_t
-============
-*/
-static void CL_GLimp_Init_Wrapper( glconfig_t *config ) {
-	// Pass the renderer's glconfig_t through; the client-side glimp fills it via
-	// its glimp_config pointer. fixedFunction = qfalse (modern OpenGL).
-	GLimp_Init( config, qfalse );
-}
-
-static void CL_GLimp_Shutdown_Wrapper( qboolean unloadDLL ) {
-	// Q3VR's GLimp_Shutdown takes no arguments
-	GLimp_Shutdown();
-}
-
-static void *CL_GL_GetProcAddress( const char *name ) {
-	// Forward to SDL
-	return SDL_GL_GetProcAddress( name );
-}
-
-/*
-============
 CL_InitRef
 ============
 */
@@ -3134,13 +3106,6 @@ void CL_InitRef( void ) {
 	if(!GetRefAPI)
 	{
 		Com_Error(ERR_FATAL, "Can't load symbol GetRefAPI: '%s'",  Sys_LibraryError());
-	}
-
-	// Must precede GetRefAPI: renderer init pulls XR resources through the backend.
-	if ( !Q_stricmp( cl_renderer->string, "vulkan" ) ) {
-		VR_SetBackend( VRVK_GetBackend() );
-	} else {
-		VR_SetBackend( VRGL_GetBackend() );
 	}
 
 	// Renderer init pulls the XR-created graphics device (vk_initialize), so
@@ -3204,8 +3169,6 @@ void CL_InitRef( void ) {
 	refImport.ftol = Q_ftol;
 
 	refImport.Sys_SetEnv = Sys_SetEnv;
-	refImport.Sys_GLimpSafeInit = Sys_GLimpSafeInit;
-	refImport.Sys_GLimpInit = Sys_GLimpInit;
 	refImport.Sys_LowPhysicalMemory = Sys_LowPhysicalMemory;
 
 	refImport.Com_RealTime = Com_RealTime;
@@ -3213,13 +3176,10 @@ void CL_InitRef( void ) {
 	// memory cleanup (Quake3e pattern): not used in Q3VR
 	refImport.FreeAll = NULL;
 
-	// OpenGL platform functions: using wrappers to match Quake3e signatures
-	refImport.GLimp_Init = CL_GLimp_Init_Wrapper;
-	refImport.GLimp_Shutdown = CL_GLimp_Shutdown_Wrapper;
+	// Window and gamma functions the Vulkan path shares
 	refImport.GLimp_EndFrame = GLimp_EndFrame;
 	refImport.GLimp_InitGamma = GLimp_InitGamma;
 	refImport.GLimp_SetGamma = GLimp_SetGamma;
-	refImport.GL_GetProcAddress = CL_GL_GetProcAddress;
 	refImport.GLimp_InitVR = GLimp_InitVR;
 
 	// Vulkan platform functions
@@ -3239,7 +3199,6 @@ void CL_InitRef( void ) {
 	refImport.vrClientInfo = &vr;
 	refImport.VR_ShouldDisableStereo = VR_ShouldDisableStereo;
 	refImport.VR_InVirtualScreen = VR_Gameplay_ShouldRenderInVirtualScreen;
-	refImport.VR_GL_GetStencilBits = VR_Backend_GetStencilBits;
 
 	ret = GetRefAPI( REF_API_VERSION, &refImport );
 

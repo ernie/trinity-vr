@@ -5,7 +5,7 @@
 
 #include "vr_macros.h"
 #include "vr_clientinfo.h"
-#include "vr_backend.h"
+#include "../vrvk/vr_vk_types.h"
 #include "common/xr_linear.h"
 
 extern cvar_t *vr_frameTimingLog;
@@ -147,9 +147,9 @@ void VR_EndFrame(XrSession session, VR_SwapchainInfos* swapchains, XrView* views
 {
 	extern vr_clientinfo_t vr;
 
-	XrSwapchain colorSwapchain;
-	int colorWidth, colorHeight;
-	VR_GetActiveBackend()->GetColorSwapchainDesc( swapchains, &colorSwapchain, &colorWidth, &colorHeight );
+	const XrSwapchain colorSwapchain = swapchains->color.swapchain;
+	const int colorWidth = (int)swapchains->color.width;
+	const int colorHeight = (int)swapchains->color.height;
 
 	// Scoped: submit only a head-locked quad sampling the cyclopean texture.
 	// Quad layers carry a single pose (no per-view geometry for SteamVR to

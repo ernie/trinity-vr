@@ -16,6 +16,7 @@
 
 #include "vr_vk.h"
 #include "../vrcommon/vr_base.h"
+#include "../vrcommon/vr_graphics.h"
 #include "../vrcommon/vr_macros.h"
 #include "vr_vk_debug.h"
 
@@ -670,12 +671,12 @@ XrResult VR_Vulkan_GetSwapchainImages(XrSwapchain swapchain,
 static VR_VK_GraphicsRequirements s_vkRequirements;
 static VR_Bool s_requirementsFetched = VR_FALSE;
 
-const char* VRVK_GetExtensionName(void)
+const char* VR_Graphics_GetExtensionName(void)
 {
 	return VR_VK_GetGraphicsExtensionName();
 }
 
-XrResult VRVK_GetRequirements(XrInstance instance, XrSystemId systemId)
+XrResult VR_Graphics_GetRequirements(XrInstance instance, XrSystemId systemId)
 {
 	XrResult result = VR_VK_GetGraphicsRequirements(instance, systemId, &s_vkRequirements);
 	if (XR_SUCCEEDED(result)) {
@@ -684,14 +685,14 @@ XrResult VRVK_GetRequirements(XrInstance instance, XrSystemId systemId)
 	return result;
 }
 
-void VRVK_PrintRequirements(void)
+void VR_Graphics_PrintRequirements(void)
 {
 	if (s_requirementsFetched) {
 		VR_VK_PrintGraphicsRequirements(&s_vkRequirements);
 	}
 }
 
-void VRVK_GraphicsInit(XrInstance instance, XrSystemId systemId)
+void VR_Graphics_Init(XrInstance instance, XrSystemId systemId)
 {
 	fprintf(stdout, "[VRVK] Initializing Vulkan via XR_KHR_vulkan_enable2...\n");
 
@@ -732,54 +733,21 @@ void VRVK_GraphicsInit(XrInstance instance, XrSystemId systemId)
 	fprintf(stdout, "[VRVK] Vulkan initialization complete\n");
 }
 
-void VRVK_GraphicsShutdown(void)
+void VR_Graphics_Shutdown(void)
 {
 	VR_Vulkan_Shutdown();
 	s_requirementsFetched = VR_FALSE;
 }
 
-void VRVK_InvalidateFunctionPointers(void)
+void VR_Graphics_InvalidateFunctionPointers(void)
 {
 	// Clear XR function pointers before XrInstance is destroyed.
 	// These were obtained via xrGetInstanceProcAddr and become invalid
 	// after xrDestroyInstance. This prevents use-after-free crashes
-	// when VRVK_GetRequirements is called after vid_restart.
+	// when VR_Graphics_GetRequirements is called after vid_restart.
 	xrGetVulkanGraphicsRequirements2KHR = NULL;
 	xrGetVulkanGraphicsDevice2KHR = NULL;
 	xrCreateVulkanInstanceKHR = NULL;
 	xrCreateVulkanDeviceKHR = NULL;
 	s_requirementsFetched = VR_FALSE;
-}
-
-static void VRVK_GetColorSwapchainDesc( const VR_SwapchainInfos *sw,
-                                        XrSwapchain *handle, int *width, int *height )
-{
-	*handle = sw->color.swapchain;
-	*width  = (int)sw->color.width;
-	*height = (int)sw->color.height;
-}
-
-static int VRVK_GetStencilBits( void ) { return 0; }
-
-const vr_backend_t* VRVK_GetBackend( void )
-{
-	static const vr_backend_t backend = {
-		.GetExtensionName = VRVK_GetExtensionName,
-		.GetRequirements = VRVK_GetRequirements,
-		.PrintRequirements = VRVK_PrintRequirements,
-		.GraphicsInit = VRVK_GraphicsInit,
-		.GraphicsShutdown = VRVK_GraphicsShutdown,
-		.InvalidateFunctionPointers = VRVK_InvalidateFunctionPointers,
-		.CreateSession = VRVK_CreateSession,
-		.GetResolution = VRVK_GetResolution,
-		.InitRenderer = VRVK_InitRenderer,
-		.DestroyRenderer = VRVK_DestroyRenderer,
-		.ProcessFrame = VRVK_ProcessFrame,
-		.RestoreState = VRVK_RestoreState,
-		.SubmitLoadingFrame = VRVK_SubmitLoadingFrame,
-		.FinishFrame = VRVK_FinishFrame,
-		.GetColorSwapchainDesc = VRVK_GetColorSwapchainDesc,
-		.GetStencilBits = VRVK_GetStencilBits,
-	};
-	return &backend;
 }

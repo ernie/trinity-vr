@@ -11,8 +11,8 @@ VR_Engine* VR_GetEngine( void );
 void VR_Destroy( VR_Engine* engine );
 void VR_PrepareForShutdown( void );
 
-// Backend-specific XR graphics setup, deferred until the renderer backend is
-// known. Idempotent; must precede any backend CreateSession/InitRenderer.
+// Deferred until the renderer DLL's GetRefAPI pulls the Vulkan device;
+// idempotent because VR_EnterVR also calls it.
 void VR_EnsureGraphicsInitialized( void );
 
 void VR_EnterVR( VR_Engine* engine );

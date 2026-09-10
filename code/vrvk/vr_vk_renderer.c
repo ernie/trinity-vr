@@ -31,15 +31,12 @@
 #include "vr_vk_swapchains.h"
 #include "vr_vk_virtual_screen.h"
 
-#include "../vrcommon/vr_backend.h"
-
 extern vr_clientinfo_t vr;
 extern cvar_t *vr_heightAdjust;
 extern cvar_t *vr_refreshrate;
 extern cvar_t *vr_desktopMode;
 
-// File-local: both backends coexist in one binary and would collide otherwise.
-// views/viewCount stay external: vr_vk_virtual_screen.c reads them.
+// This file owns the per-frame VR state; views/viewCount stay external because vr_vk_virtual_screen.c reads them.
 static const float hudScale = M_PI * 15.0f / 180.0f;
 
 static XrBool32 stageSupported = XR_FALSE;
@@ -85,14 +82,17 @@ static void ConvertToReversedDepth(XrMatrix4x4f* matrix)
 }
 static XrDesktopViewConfiguration VR_GetDesktopViewConfiguration(void);
 
+// A frame is begun and not yet ended; RestoreState re-begins it after a mid-frame restart
+static qboolean frameStarted = qfalse;
 
-void VRVK_GetResolution(VR_Engine* engine, int *pWidth, int *pHeight)
+
+void VR_GetResolution(VR_Engine* engine, int *pWidth, int *pHeight)
 {
 	VR_GetSupersampledResolution(engine->appState.Instance, engine->appState.SystemId, pWidth, pHeight);
 }
 
 
-void VRVK_InitRenderer(VR_Engine* engine)
+void VR_InitRenderer(VR_Engine* engine)
 {
 	VR_VK_RegisterDebugCallbackIfEnabled();
 
@@ -149,7 +149,7 @@ void VRVK_InitRenderer(VR_Engine* engine)
 }
 
 
-void VRVK_DestroyRenderer(VR_Engine* engine)
+void VR_DestroyRenderer(VR_Engine* engine)
 {
 	VRVK_VirtualScreen_Destroy();
 	VR_VK_DestroySwapchains(&engine->appState.Renderer.Swapchains);
@@ -163,7 +163,7 @@ void VRVK_DestroyRenderer(VR_Engine* engine)
 }
 
 
-void VRVK_ProcessFrame(VR_Engine* engine)
+void VR_ProcessFrame(VR_Engine* engine)
 {
 	const XrBool32 needsRecenter = VR_ProcessXrEvents(&engine->appState);
 	if (engine->appState.SessionActive == VR_FALSE)
@@ -176,12 +176,6 @@ void VRVK_ProcessFrame(VR_Engine* engine)
 
 	VR_Renderer_BeginFrame(engine, needsRecenter);
 	Com_Frame();
-	// vid_restart inside Com_Frame may have switched backends; if so this
-	// frame was re-begun on the new one, so finish it there instead.
-	if ( VR_GetActiveBackend() != VRVK_GetBackend() ) {
-		VR_GetActiveBackend()->FinishFrame(engine);
-		return;
-	}
 	VR_Renderer_EndFrame(engine);
 
 	if (needRecenter)
@@ -192,11 +186,9 @@ void VRVK_ProcessFrame(VR_Engine* engine)
 }
 
 
-void VRVK_RestoreState(VR_Engine* engine)
+void VR_Renderer_RestoreState(VR_Engine* engine)
 {
-	// Cross-backend check: after a switch, the interrupted frame may have
-	// been begun by the other backend (see vr_backend.h).
-	if (!VR_FrameInFlight())
+	if (!frameStarted)
 	{
 		// Frame hasn't started, no need to restore anything here
 		return;
@@ -218,7 +210,7 @@ void VRVK_RestoreState(VR_Engine* engine)
 
 static void VR_Renderer_BeginFrame(VR_Engine* engine, XrBool32 needsRecenter)
 {
-	VR_SetFrameInFlight(qtrue);
+	frameStarted = qtrue;
 	lastPredictedDisplayTime = VR_WaitFrame(engine->appState.Session).predictedDisplayTime;
 
 	if (needsRecenter)
@@ -372,7 +364,7 @@ static void VR_Renderer_EndFrame(VR_Engine* engine)
 		engine->appState.ViewSpace,
 		lastPredictedDisplayTime);
 
-	VR_SetFrameInFlight(qfalse);
+	frameStarted = qfalse;
 }
 
 
@@ -483,10 +475,10 @@ static XrDesktopViewConfiguration VR_GetDesktopViewConfiguration(void)
 }
 
 
-qboolean VRVK_SubmitLoadingFrame(VR_Engine* engine)
+qboolean VR_Renderer_SubmitLoadingFrame(VR_Engine* engine)
 {
 	// Only submit frames during loading states when a frame has been started
-	if ((clc.state != CA_LOADING && clc.state != CA_PRIMED) || !VR_FrameInFlight())
+	if ((clc.state != CA_LOADING && clc.state != CA_PRIMED) || !frameStarted)
 	{
 		return qfalse;
 	}
@@ -500,14 +492,4 @@ qboolean VRVK_SubmitLoadingFrame(VR_Engine* engine)
 	VR_Renderer_BeginFrame(engine, XR_FALSE);
 
 	return qtrue;
-}
-
-// Ends a frame RestoreState re-began here after a mid-frame renderer switch.
-void VRVK_FinishFrame( VR_Engine* engine )
-{
-	if (!VR_FrameInFlight())
-	{
-		return;
-	}
-	VR_Renderer_EndFrame(engine);
 }

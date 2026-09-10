@@ -1,8 +1,8 @@
 /*
  * vr_swapchains.h - Common OpenXR swapchain utilities
  *
- * Graphics-API-agnostic OpenXR operations shared by vrgl2 and vrvk.
- * These functions only call OpenXR APIs and don't touch OpenGL or Vulkan.
+ * OpenXR swapchain operations that touch no graphics API.
+ * These functions only call OpenXR APIs and never touch Vulkan.
  */
 
 #ifndef __VR_SWAPCHAINS_COMMON

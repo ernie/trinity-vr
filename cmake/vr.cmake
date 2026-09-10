@@ -4,11 +4,11 @@ include_guard(GLOBAL)
 find_package(OpenXR CONFIG REQUIRED)
 list(APPEND VR_LIBRARIES OpenXR::openxr_loader OpenXR::headers)
 
-# vr_types.h includes vulkan.h in every configuration (runtime backend dispatch)
+# vr_types.h includes vulkan.h because OpenXR's Vulkan platform types need it
 find_package(Vulkan REQUIRED)
 list(APPEND VR_INCLUDE_DIRS ${Vulkan_INCLUDE_DIRS})
 
-# vrcommon - Renderer-agnostic VR sources (shared by all renderers)
+# vrcommon - The OpenXR layer; Vulkan-specific parts live in vrvk
 set(VR_COMMON_SOURCES
     ${SOURCE_DIR}/vrcommon/vr_cvars.c
     ${SOURCE_DIR}/vrcommon/vr_debug.c
@@ -26,17 +26,6 @@ set(VR_COMMON_SOURCES
     ${SOURCE_DIR}/vrcommon/vr_render_loop.c
     ${SOURCE_DIR}/vrcommon/vr_session.c
     ${SOURCE_DIR}/vrcommon/vr_virtual_screen.c
-    ${SOURCE_DIR}/vrcommon/vr_backend.c
-)
-
-# vrgl2 - OpenGL-specific VR sources
-set(VR_GL2_SOURCES
-    ${SOURCE_DIR}/vrgl2/vr_gl.c
-    ${SOURCE_DIR}/vrgl2/vr_gl_debug.c
-    ${SOURCE_DIR}/vrgl2/vr_gl_renderer.c
-    ${SOURCE_DIR}/vrgl2/vr_gl_session.c
-    ${SOURCE_DIR}/vrgl2/vr_gl_swapchains.c
-    ${SOURCE_DIR}/vrgl2/vr_gl_virtual_screen.c
 )
 
 # vrvk - Vulkan-specific VR sources (XR_KHR_vulkan_enable2 integration)
@@ -49,18 +38,15 @@ set(VR_VK_SOURCES
     ${SOURCE_DIR}/vrvk/vr_vk_virtual_screen.c
 )
 
-# The single client links every VR backend (vrcommon + vrgl2 + vrvk); the
-# renderer DLL and matching backend are chosen at runtime via cl_renderer.
-set(VR_SOURCES ${VR_COMMON_SOURCES} ${VR_GL2_SOURCES} ${VR_VK_SOURCES})
+# The client links the VR layer (vrcommon + vrvk); the renderer DLL is loaded
+# through cl_renderer.
+set(VR_SOURCES ${VR_COMMON_SOURCES} ${VR_VK_SOURCES})
 
-# The client links both graphics loaders: vrvk makes Vulkan calls (cl_main.c
-# needs vkGetInstanceProcAddr) and vrgl2 makes raw gl* calls.
-find_package(OpenGL REQUIRED)
-list(APPEND VR_LIBRARIES Vulkan::Vulkan ${OPENGL_LIBRARIES})
+# The client makes Vulkan calls itself (cl_main.c needs vkGetInstanceProcAddr).
+list(APPEND VR_LIBRARIES Vulkan::Vulkan)
 
 list(APPEND VR_INCLUDE_DIRS
     ${SOURCE_DIR}/vrcommon
-    ${SOURCE_DIR}/vrgl2
     ${SOURCE_DIR}/vrvk)
 
 list(APPEND RENDERER_INCLUDE_DIRS ${VR_INCLUDE_DIRS})

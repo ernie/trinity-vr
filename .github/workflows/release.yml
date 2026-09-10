@@ -54,7 +54,6 @@ jobs:
             build/Release/**/*.dll
             build/Release/**/trinityvr.exe
             build/Release/**/renderer_vulkan.dll
-            build/Release/**/renderer_opengl2.dll
             build/Release/**/*.pk3
           if-no-files-found: error
           retention-days: 5
@@ -99,7 +98,6 @@ jobs:
             build/Release/**/*.dll
             build/Release/**/trinityvr.exe
             build/Release/**/renderer_vulkan.dll
-            build/Release/**/renderer_opengl2.dll
             build/Release/**/*.pk3
           if-no-files-found: error
           retention-days: 5
@@ -160,7 +158,6 @@ jobs:
             build/Release/**/*.so
             build/Release/**/trinityvr
             build/Release/**/renderer_vulkan.so
-            build/Release/**/renderer_opengl2.so
             build/Release/**/*.pk3
           if-no-files-found: error
           retention-days: 5

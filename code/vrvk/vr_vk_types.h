@@ -1,7 +1,7 @@
 #ifndef __VR_VK_TYPES
 #define __VR_VK_TYPES
 
-// vr_types.h sets up both graphics APIs' OpenXR platform types
+// vr_types.h sets up the Vulkan OpenXR platform types
 #include "../vrcommon/vr_types.h"
 
 // Vulkan graphics requirements from OpenXR (XR_KHR_vulkan_enable2)

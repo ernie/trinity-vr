@@ -2,8 +2,7 @@
  * vr_graphics.h - Graphics API abstraction interface
  *
  * This header provides an abstraction layer for graphics-specific VR operations.
- * The actual implementations are provided by vrgl2/vr_gl.c or vrvk/vr_vk.c
- * depending on which renderer is being built.
+ * The implementations are in vrvk/vr_vk.c.
  */
 
 #ifndef __VR_GRAPHICS_H
@@ -12,7 +11,6 @@
 #include <openxr/openxr.h>
 
 // Get the graphics API extension name for OpenXR instance creation
-// Returns XR_KHR_OPENGL_ENABLE_EXTENSION_NAME for OpenGL
 // Returns XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME for Vulkan
 const char* VR_Graphics_GetExtensionName(void);
 
@@ -27,7 +25,6 @@ void VR_Graphics_PrintRequirements(void);
 // Initialize graphics-specific VR subsystems
 // Called after OpenXR instance is created
 // Vulkan: creates VkInstance and VkDevice via xrCreateVulkanInstanceKHR/xrCreateVulkanDeviceKHR
-// OpenGL: no-op (context created by SDL later)
 void VR_Graphics_Init(XrInstance instance, XrSystemId systemId);
 
 // Shutdown graphics-specific VR subsystems
@@ -44,7 +41,7 @@ void VR_Graphics_InvalidateFunctionPointers(void);
 XrResult VR_Graphics_CreateSession(XrInstance instance, XrSystemId systemId, XrSession* session);
 
 // Virtual screen interface: implemented in vrcommon (vr_virtual_screen.c),
-// graphics-agnostic and not part of vr_backend_t.
+// graphics-agnostic and not one of the roles above.
 void VR_VirtualScreen_ResetPosition(void);
 float VR_VirtualScreen_GetCurrentYaw(void);
 

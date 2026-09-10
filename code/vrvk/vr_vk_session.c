@@ -13,6 +13,7 @@
 #include "vr_vk.h"
 #include "../qcommon/q_shared.h"
 #include "../vrcommon/vr_macros.h"
+#include "../vrcommon/vr_graphics.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -78,8 +79,7 @@ XrResult VR_VK_CreateSession(XrInstance instance, XrSystemId systemId, XrSession
 	return result;
 }
 
-// vr_backend_t interface implementation
-XrResult VRVK_CreateSession(XrInstance instance, XrSystemId systemId, XrSession* session)
+XrResult VR_Graphics_CreateSession(XrInstance instance, XrSystemId systemId, XrSession* session)
 {
 	return VR_VK_CreateSession(instance, systemId, session);
 }

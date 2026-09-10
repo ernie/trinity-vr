@@ -10,16 +10,9 @@
 #elif defined(__ANDROID__)
 #define XR_USE_PLATFORM_ANDROID
 #endif
-// Non-Windows desktop: no platform define here; the OpenGL backend's Xlib
-// setup (XR_USE_PLATFORM_XLIB) lives in vrgl2/vr_gl_types.h, GL-side TUs only.
-
-// Both graphics APIs' OpenXR types are enabled; the active backend is chosen
-// at runtime (see vr_backend.h). vulkan.h must precede openxr_platform.h.
-// No GL header here: renderer TUs carrying their own GL-type shims (e.g.
-// renderervk/tr_local.h) would collide with real GL typedefs pulled in here.
+// vulkan.h must precede openxr_platform.h so OpenXR can use Vulkan types
 #include <vulkan/vulkan.h>
 #define XR_USE_GRAPHICS_API_VULKAN
-#define XR_USE_GRAPHICS_API_OPENGL
 
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
@@ -34,8 +27,7 @@ typedef XrBool32 VR_Bool;
 #define VR_TRUE  XR_TRUE
 #define VR_FALSE XR_FALSE
 
-// Forward declaration for graphics-specific swapchain info
-// The actual struct is defined in vrgl2/vr_gl_types.h or vrvk/vr_vk_types.h
+// The struct is defined in vrvk/vr_vk_types.h
 typedef struct VR_SwapchainInfos_s VR_SwapchainInfos;
 
 typedef struct

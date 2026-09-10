@@ -229,8 +229,6 @@ typedef struct {
 
 	// system stuff
 	void	(*Sys_SetEnv)( const char *name, const char *value );
-	void	(*Sys_GLimpSafeInit)( void );
-	void	(*Sys_GLimpInit)( void );
 	qboolean (*Sys_LowPhysicalMemory)( void );
 
 	// Time utilities
@@ -239,13 +237,10 @@ typedef struct {
 	// memory cleanup (Quake3e pattern)
 	void	(*FreeAll)( void );
 
-	// OpenGL platform functions
-	void	(*GLimp_Init)( glconfig_t *config );
-	void	(*GLimp_Shutdown)( qboolean unloadDLL );
+	// Window and gamma functions (SDL), shared by the Vulkan path
 	void	(*GLimp_EndFrame)( void );
 	void	(*GLimp_InitGamma)( glconfig_t *config );
 	void	(*GLimp_SetGamma)( unsigned char red[256], unsigned char green[256], unsigned char blue[256] );
-	void*	(*GL_GetProcAddress)( const char *name );
 	void	(*GLimp_InitVR)( void );  // Initialize VR session and renderer after graphics init
 
 	// Vulkan platform functions
@@ -275,10 +270,6 @@ typedef struct {
 	// VR gameplay state queries (client-side vr_gameplay.c)
 	qboolean (*VR_ShouldDisableStereo)( void );
 	qboolean (*VR_InVirtualScreen)( void );
-
-	// GL backend: stencil bits chosen for the XR framebuffer (0 on Vulkan).
-	// Renderer copies into glConfig.stencilBits at XR-resource init.
-	int (*VR_GL_GetStencilBits)( void );
 } refimport_t;
 
 extern	refimport_t	ri;

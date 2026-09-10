@@ -3,7 +3,8 @@
 
 #include <vulkan/vulkan.h>
 #include "../vrcommon/vr_types.h"
-#include "../vrcommon/vr_backend.h"
+#include "../vrcommon/vr_graphics.h"
+#include "../vrcommon/vr_renderer.h"
 #include "vr_vk_types.h"
 
 // Get the Vulkan graphics extension name for OpenXR instance creation
@@ -127,31 +128,5 @@ XrResult VR_Vulkan_GetSwapchainImages(XrSwapchain swapchain,
                                        VkImage** images, uint32_t* imageCount);
 
 // VkImageView/VkFramebuffer creation in renderer (see vk_create_xr_image_views in vk.c)
-
-// ============================================================================
-// vr_backend_t implementation for Vulkan (see vrcommon/vr_backend.h)
-// ============================================================================
-
-// vr_graphics.h roles
-const char* VRVK_GetExtensionName( void );
-XrResult    VRVK_GetRequirements( XrInstance instance, XrSystemId systemId );
-void        VRVK_PrintRequirements( void );
-void        VRVK_GraphicsInit( XrInstance instance, XrSystemId systemId );
-void        VRVK_GraphicsShutdown( void );
-void        VRVK_InvalidateFunctionPointers( void );
-XrResult    VRVK_CreateSession( XrInstance instance, XrSystemId systemId, XrSession *session );
-
-// vr_renderer.h roles
-void        VRVK_GetResolution( VR_Engine *engine, int *pWidth, int *pHeight );
-void        VRVK_InitRenderer( VR_Engine *engine );
-void        VRVK_DestroyRenderer( VR_Engine *engine );
-void        VRVK_ProcessFrame( VR_Engine *engine );
-void        VRVK_RestoreState( VR_Engine *engine );
-qboolean    VRVK_SubmitLoadingFrame( VR_Engine *engine );
-
-// Ends a frame the other backend began, after a mid-frame renderer switch.
-void        VRVK_FinishFrame( VR_Engine *engine );
-
-const vr_backend_t* VRVK_GetBackend( void );
 
 #endif // __VR_VULKAN_H

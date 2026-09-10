@@ -2,7 +2,6 @@
 #include "../qcommon/qcommon.h"
 #include "../client/client.h"
 #include "vr_base.h"
-#include "vr_backend.h"
 #include "vr_clientinfo.h"
 #include "vr_shared.h"
 #include "vr_debug.h"
@@ -64,18 +63,13 @@ static void VR_BuildExtensionList(void)
 {
 	numRequiredExtensions = 0;
 
-	// Backend is not yet known (cl_renderer is read after Com_Init), so request
-	// both graphics-binding extensions the runtime advertises; the unused one is harmless.
 	if ( VR_HasInstanceExtension( XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME ) )
 		requiredExtensionNames[numRequiredExtensions++] = XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME;
-	if ( VR_HasInstanceExtension( XR_KHR_OPENGL_ENABLE_EXTENSION_NAME ) )
-		requiredExtensionNames[numRequiredExtensions++] = XR_KHR_OPENGL_ENABLE_EXTENSION_NAME;
 
 	requiredExtensionNames[numRequiredExtensions++] = XR_EXT_DEBUG_UTILS_EXTENSION_NAME;
 	requiredExtensionNames[numRequiredExtensions++] = XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME;
 
-	// Vulkan-only optional extensions (no-ops for the GL backend; instance-level,
-	// so they must be requested here even though the backend is chosen later)
+	// Optional extensions, instance-level, so requested here before the renderer loads
 	if ( numRequiredExtensions < MAX_REQUIRED_EXTENSIONS &&
 		VR_HasInstanceExtension( "XR_KHR_vulkan_swapchain_format_list" ) )
 		requiredExtensionNames[numRequiredExtensions++] = "XR_KHR_vulkan_swapchain_format_list";
@@ -89,8 +83,8 @@ void VR_InitInstanceInput( VR_Engine* );
 
 static qboolean vr_graphicsInitialized = qfalse;
 
-// Backend-specific XR graphics setup, deferred from VR_Init until the backend
-// (cl_renderer) is known. Idempotent.
+// Deferred until the renderer DLL's GetRefAPI pulls the Vulkan device;
+// idempotent because VR_EnterVR also calls it.
 void VR_EnsureGraphicsInitialized( void )
 {
 	if ( vr_graphicsInitialized || vr_engine.appState.Instance == XR_NULL_HANDLE )
@@ -102,8 +96,7 @@ void VR_EnsureGraphicsInitialized( void )
 
 	VR_Graphics_PrintRequirements();
 
-	// Vulkan: creates VkInstance/VkDevice via xrCreateVulkanInstanceKHR /
-	// xrCreateVulkanDeviceKHR. OpenGL: no-op (context created by SDL later).
+	// Creates the VkInstance and VkDevice through xrCreateVulkanInstanceKHR and xrCreateVulkanDeviceKHR
 	VR_Graphics_Init( vr_engine.appState.Instance, vr_engine.appState.SystemId );
 
 	vr_graphicsInitialized = qtrue;

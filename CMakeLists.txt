@@ -14,13 +14,11 @@ project(${PROJECT_NAME} VERSION ${PROJECT_VERSION} LANGUAGES C CXX)
 
 option(BUILD_SERVER "Build dedicated server" OFF)
 option(BUILD_CLIENT "Build client" ON)
-option(BUILD_RENDERER_GL2 "Build GL2 renderer module (renderer_opengl2)" ON)
 option(BUILD_RENDERER_VK "Build Vulkan renderer module (renderer_vulkan)" ON)
 option(BUILD_GAME_LIBRARIES "Build game module libraries" ON)
 option(BUILD_STANDALONE "Build binaries for standalone games" OFF)
 
-# Single client binary + renderer DLLs; both VR backends are compiled in and
-# the matching one is selected at runtime via cl_renderer.
+# Single client binary plus the Vulkan renderer DLL, loaded through cl_renderer.
 option(USE_RENDERER_DLOPEN "Dynamically load renderer" ON)
 option(USE_OPENAL "OpenAL audio" ON)
 option(USE_OPENAL_DLOPEN "Dynamically load OpenAL" ON)
@@ -84,7 +82,6 @@ include(platforms/all)
 include(libraries/all)
 
 include(server)
-include(renderer_gl2)
 include(renderer_vk)
 include(client)
 if(BUILD_GAME_LIBRARIES)

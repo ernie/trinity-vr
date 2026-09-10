@@ -18,7 +18,7 @@ void VR_VK_RegisterDebugCallbackIfEnabled(void)
 	// in vr_vk.c as part of the XR_KHR_vulkan_enable2 workflow.
 	//
 	// If additional VR-layer-specific Vulkan debugging is needed, it can be
-	// added here. For now, this is a placeholder for parity with vr_gl_debug.
+	// added here.
 	fprintf(stderr, "[VR_VK] Vulkan debug enabled\n");
 #endif
 }

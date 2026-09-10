@@ -42,8 +42,7 @@ XrResult VR_GetHMDSystem(XrInstance instance, XrSystemId* systemId)
 	return xrGetSystem(instance, &systemGetInfo, systemId);
 }
 
-// Graphics requirements are now fetched via VR_Graphics_GetRequirements()
-// in vrgl2/vr_gl.c or vrvk/vr_vk.c depending on the renderer being built.
+// Graphics requirements are fetched via VR_Graphics_GetRequirements() in vrvk/vr_vk.c
 
 XrResult VR_GetSystemProperties(XrInstance instance, XrSystemId systemId, VR_SystemProperties* systemProperties)
 {

@@ -3,7 +3,7 @@
  *
  * The virtual screen shows menus, the console, and first-person follow
  * mode. This module owns the anchor pose state and the model/view matrix
- * math; the renderer layers (vrvk, vrgl2) own their graphics resources and
+ * math; the renderer layer (vrvk) owns its graphics resources and
  * draw paths and pull poses from here.
  */
 
