@@ -152,6 +152,26 @@ void VR_EndFrame(XrSession session, VR_SwapchainInfos* swapchains, XrView* views
 	const int colorWidth = (int)swapchains->color.width;
 	const int colorHeight = (int)swapchains->color.height;
 
+	// Both layer shapes below name the color swapchain, and naming one that
+	// has never released an image is rejected: xrEndFrame answers
+	// XR_ERROR_LAYER_INVALID, which XR_CHECK turns into exit(). A vid_restart
+	// builds a fresh swapchain part way through Com_Frame, and an ERR_DROP
+	// after that point longjmps past the screen update that would have drawn
+	// into it, leaving this the frame's first and only use of it. Submit an
+	// empty frame until the swapchain holds something.
+	if (!swapchains->color.everReleased)
+	{
+		XrFrameEndInfo emptyFrameInfo = {};
+		emptyFrameInfo.type = XR_TYPE_FRAME_END_INFO;
+		emptyFrameInfo.displayTime = predictedDisplayTime;
+		emptyFrameInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+		emptyFrameInfo.layerCount = 0;
+		emptyFrameInfo.layers = NULL;
+
+		XR_CHECK(xrEndFrame(session, &emptyFrameInfo), "Failed to end XR frame");
+		return;
+	}
+
 	// Scoped: submit only a head-locked quad sampling the cyclopean texture.
 	// Quad layers carry a single pose (no per-view geometry for SteamVR to
 	// override per-eye) so the crosshair lands on the same world ray for both

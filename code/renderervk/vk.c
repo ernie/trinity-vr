@@ -6296,7 +6296,7 @@ void vk_create_post_process_pipelines( void )
 	VkRect2D scissor;
 	VkSpecializationMapEntry spec_entries[11];
 	VkSpecializationInfo frag_spec_info;
-	uint32_t i, width, height;
+	uint32_t i, width, height, bloomWidth, bloomHeight;
 
 	struct FragSpecData {
 		float gamma;
@@ -6314,8 +6314,8 @@ void vk_create_post_process_pipelines( void )
 
 	// Note: This is called during vk_init_xr_resources() before vk.xr.initialized is set
 	// So we check the prerequisites directly instead of vk.xr.initialized
-	if ( vk.xr.width == 0 || vk.xr.height == 0 ) {
-		ri.Printf( PRINT_WARNING, "vk_create_post_process_pipelines: XR dimensions not set\n" );
+	if ( vk.xr.width == 0 || vk.xr.height == 0 || gls.captureWidth == 0 || gls.captureHeight == 0 ) {
+		ri.Printf( PRINT_WARNING, "vk_create_post_process_pipelines: XR or capture dimensions not set\n" );
 		return;
 	}
 
@@ -6326,6 +6326,16 @@ void vk_create_post_process_pipelines( void )
 
 	width = vk.xr.width;
 	height = vk.xr.height;
+
+	// The bloom images and the post_bloom framebuffer are allocated in
+	// vk_create_attachments()/vk_create_fbo_framebuffers() from gls.captureWidth/
+	// Height, not vk.xr.width/height. Both values come from VR_GetSupersampledResolution,
+	// but through two independent calls (window setup in sdl_glimp.c, swapchain
+	// creation in vr_vk_swapchains.c) with nothing tying them together, so the
+	// bloom extract/blur/blend pipelines below follow the memory that actually
+	// exists rather than the XR swapchain size the gamma pipeline targets.
+	bloomWidth = gls.captureWidth;
+	bloomHeight = gls.captureHeight;
 
 	// Common vertex input state (no vertex input for fullscreen quad)
 	vertex_input_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -6521,6 +6531,14 @@ void vk_create_post_process_pipelines( void )
 		set_shader_stage_desc( shader_stages+1, VK_SHADER_STAGE_FRAGMENT_BIT, vk.modules.bloom_fs, "main" );
 		shader_stages[1].pSpecializationInfo = &frag_spec_info;
 
+		// viewport_state still points at the gamma pipeline's viewport/scissor
+		// above; bloom_extract writes bloom_image[0], sized at bloomWidth/Height,
+		// not the XR swapchain size the gamma viewport was set to.
+		viewport.width = (float)bloomWidth;
+		viewport.height = (float)bloomHeight;
+		scissor.extent.width = bloomWidth;
+		scissor.extent.height = bloomHeight;
+
 		create_info.renderPass = vk.render_pass.bloom_extract;
 
 		VK_CHECK( qvkCreateGraphicsPipelines( vk.device, VK_NULL_HANDLE, 1, &create_info, NULL, &vk.bloom_extract_pipeline ) );
@@ -6530,8 +6548,8 @@ void vk_create_post_process_pipelines( void )
 		// 3. XR Blur Pipelines
 		// =================================================================
 		for ( i = 0; i < VK_NUM_BLOOM_PASSES * 2; i++ ) {
-			float blur_spec_data[3];
-			VkSpecializationMapEntry blur_spec_entries[3];
+			float blur_spec_data[2];
+			VkSpecializationMapEntry blur_spec_entries[2];
 			VkSpecializationInfo blur_spec_info;
 			uint32_t blur_width, blur_height;
 			qboolean horizontal = (i % 2) == 0;
@@ -6543,12 +6561,15 @@ void vk_create_post_process_pipelines( void )
 			}
 
 			// Calculate blur pass dimensions
-			blur_width = width / ( 2 << ( i / 2 ) );
-			blur_height = height / ( 2 << ( i / 2 ) );
+			blur_width = bloomWidth / ( 2 << ( i / 2 ) );
+			blur_height = bloomHeight / ( 2 << ( i / 2 ) );
 
-			blur_spec_data[0] = 1.2f / (float)blur_width;   // x offset
-			blur_spec_data[1] = 1.2f / (float)blur_height;  // y offset
-			blur_spec_data[2] = 1.0f;                        // intensity
+			// blur.frag offsets the coordinate it samples the source with, so
+			// the offset is in source texels. Each horizontal pass reads the
+			// previous octave at twice its own width, the verticals read their
+			// own resolution
+			blur_spec_data[0] = 1.2f / (float)( blur_width * 2 );  // x offset
+			blur_spec_data[1] = 1.2f / (float)blur_height;         // y offset
 
 			if ( horizontal ) {
 				blur_spec_data[1] = 0.0f;
@@ -6564,11 +6585,7 @@ void vk_create_post_process_pipelines( void )
 			blur_spec_entries[1].offset = sizeof( float );
 			blur_spec_entries[1].size = sizeof( float );
 
-			blur_spec_entries[2].constantID = 2;
-			blur_spec_entries[2].offset = 2 * sizeof( float );
-			blur_spec_entries[2].size = sizeof( float );
-
-			blur_spec_info.mapEntryCount = 3;
+			blur_spec_info.mapEntryCount = 2;
 			blur_spec_info.pMapEntries = blur_spec_entries;
 			blur_spec_info.dataSize = sizeof( blur_spec_data );
 			blur_spec_info.pData = blur_spec_data;
@@ -6599,10 +6616,13 @@ void vk_create_post_process_pipelines( void )
 		set_shader_stage_desc( shader_stages+1, VK_SHADER_STAGE_FRAGMENT_BIT, vk.modules.blend_fs, "main" );
 		shader_stages[1].pSpecializationInfo = &frag_spec_info;
 
-		viewport.width = (float)width;
-		viewport.height = (float)height;
-		scissor.extent.width = width;
-		scissor.extent.height = height;
+		// Blend writes vk.framebuffers.post_bloom, built at glConfig.vidWidth/
+		// Height (see vk_create_fbo_framebuffers) -- the same bloomWidth/Height
+		// source, not the XR swapchain size.
+		viewport.width = (float)bloomWidth;
+		viewport.height = (float)bloomHeight;
+		scissor.extent.width = bloomWidth;
+		scissor.extent.height = bloomHeight;
 
 		// Bloom blend uses additive blending
 		attachment_blend_state.blendEnable = VK_TRUE;
@@ -11613,8 +11633,12 @@ qboolean vk_bloom( void )
 		return qfalse;
 	}
 
-	width = vk.xr.width;
-	height = vk.xr.height;
+	// The bloom images, bloom framebuffers, and post_bloom framebuffer this
+	// function renders into are all allocated at gls.captureWidth/Height (see
+	// vk_create_attachments/vk_create_fbo_framebuffers), not vk.xr.width/height --
+	// this whole chain samples and writes the FBO, never the XR swapchain.
+	width = gls.captureWidth;
+	height = gls.captureHeight;
 
 	vk_end_render_pass(); // end main FBO render pass
 	vk_gpu_time_stamp( GPU_TIME_MAIN_END );

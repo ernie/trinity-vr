@@ -21,6 +21,10 @@ typedef struct VR_VK_SwapchainInfo_s {
 	uint32_t imageCount;         // Number of swapchain images
 	VkImage* images;             // VkImage handles from XR (NOT owned: from OpenXR)
 	XrBool32 acquired;           // An image is held; a frame that draws nothing holds none
+	// A composition layer may only name a swapchain that has released an
+	// image. Tracked on the swapchain so it cannot outlive the one a
+	// vid_restart replaces.
+	XrBool32 everReleased;
 } VR_VK_SwapchainInfo;
 
 // Concrete implementation of VR_SwapchainInfos for Vulkan

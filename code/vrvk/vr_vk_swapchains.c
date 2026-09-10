@@ -122,6 +122,9 @@ static void VR_VK_DestroySwapchain(VR_VK_SwapchainInfo* info)
 		XrSwapchainImageReleaseInfo releaseInfo = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO, NULL};
 		xrReleaseSwapchainImage(info->swapchain, &releaseInfo);
 		info->acquired = XR_FALSE;
+		// everReleased is deliberately not latched here: info is freed right
+		// after, and its replacement is calloc'd fresh (see everReleased in
+		// vr_vk_types.h).
 	}
 
 	// Free images array (we don't own the VkImages themselves: OpenXR does)
@@ -262,6 +265,7 @@ void VR_VK_Swapchains_Release(VR_SwapchainInfos* swapchains)
 		"Failed to release color swapchain image");
 
 	swapchains->color.acquired = XR_FALSE;
+	swapchains->color.everReleased = XR_TRUE;
 }
 
 //

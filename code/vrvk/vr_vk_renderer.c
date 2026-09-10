@@ -668,8 +668,11 @@ void VR_Renderer_BeginRender(VR_Engine* engine)
 
 qboolean VR_Renderer_SubmitLoadingFrame(VR_Engine* engine)
 {
-	// Only submit frames during loading states when a frame has been started
-	if ((clc.state != CA_LOADING && clc.state != CA_PRIMED) || !frameStarted)
+	// Only submit frames during loading states when a frame has been started.
+	// engine is unguarded past this point (VR_Renderer_EndFrame/BeginFrame both
+	// dereference it directly), so check it here the way VR_Renderer_BeginRender
+	// checks it before its own dereference.
+	if (!engine || (clc.state != CA_LOADING && clc.state != CA_PRIMED) || !frameStarted)
 	{
 		return qfalse;
 	}
