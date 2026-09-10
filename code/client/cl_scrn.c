@@ -826,6 +826,10 @@ void SCR_UpdateScreen( void ) {
 	// that case.
 	if( uivm || com_dedicated->integer )
 	{
+		// The frame's image is acquired here, not at the frame begin, so a
+		// frame that draws nothing holds none
+		VR_Renderer_BeginRender( VR_GetEngine() );
+
 #if 0
 		// XXX
 		int in_anaglyphMode = Cvar_VariableIntegerValue("r_anaglyphMode");

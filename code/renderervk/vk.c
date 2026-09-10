@@ -727,7 +727,7 @@ static void vk_create_render_passes( void )
 	Com_Memset( &deps, 0, sizeof( deps ) );
 
 	// deps[0]: External -> subpass 0 (wait for previous operations before color/depth output)
-	// Includes depth stages for mainResume which uses LOAD_OP_LOAD on depth after HUD pass
+	// Includes depth stages so an earlier frame's depth work finishes before this pass clears
 	deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
 	deps[0].dstSubpass = 0;
 	deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
@@ -857,8 +857,8 @@ static void vk_create_render_passes( void )
 	 *
 	 * Main pass attachments:
 	 *   [0] Color resolve target (1x samples) - STORE for gamma pass
-	 *   [1] Depth (multisampled if MSAA) - STORE for mainResume after HUD
-	 *   [2] MSAA color (only if MSAA active) - STORE for mainResume
+	 *   [1] Depth (multisampled if MSAA) - STORE for the post-bloom pass, which loads it
+	 *   [2] MSAA color (only if MSAA active) - STORE for the post-bloom pass, which loads it
 	 *
 	 * Uses reversed depth (near=1.0, far=0.0) for precision.
 	 */
@@ -902,7 +902,7 @@ static void vk_create_render_passes( void )
 		attachments[1].format = depth_format;
 		attachments[1].samples = vk.msaaActive ? vkSamples : VK_SAMPLE_COUNT_1_BIT;
 		attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-		// Must STORE at every sample count: post_bloom and mainResume LOAD depth
+		// Must STORE at every sample count: post_bloom LOADs depth
 		attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 		attachments[1].stencilLoadOp = glConfig.stencilBits ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 		attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -943,7 +943,7 @@ static void vk_create_render_passes( void )
 #else
 			attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 #endif
-			attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE; // Needed for mainResume
+			attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE; // post_bloom loads it
 			attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 			attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 			attachments[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -974,7 +974,7 @@ static void vk_create_render_passes( void )
 				attachments[4].format = VK_FORMAT_R16G16B16A16_SFLOAT;
 				attachments[4].samples = vkSamples;
 				attachments[4].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-				attachments[4].storeOp = VK_ATTACHMENT_STORE_OP_STORE; // Needed for mainResume
+				attachments[4].storeOp = VK_ATTACHMENT_STORE_OP_STORE; // post_bloom loads it
 				attachments[4].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 				attachments[4].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 				attachments[4].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -1021,42 +1021,6 @@ static void vk_create_render_passes( void )
 		VK_CHECK( qvkCreateRenderPass( device, &desc, NULL, &vk.render_pass.main ) );
 		SET_OBJECT_NAME( vk.render_pass.main, "render pass - XR main (multiview)", VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT );
 		ri.Printf( PRINT_ALL, "Created main render pass: %p (attachments: %d)\n", (void*)vk.render_pass.main, desc.attachmentCount );
-
-		// mainResume: same as main but LOAD_OP_LOAD to preserve content after HUD pass
-		// initialLayout must NOT be UNDEFINED with LOAD_OP_LOAD
-		attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-		attachments[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-		if ( vk.msaaActive ) {
-			// MSAA: main pass stored depth, so we can LOAD it
-			attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-			attachments[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-			attachments[1].stencilLoadOp = glConfig.stencilBits ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-			attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-			attachments[2].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-		} else {
-			// Non-MSAA: main pass stored depth, so we can LOAD it
-			attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-			attachments[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-			attachments[1].stencilLoadOp = glConfig.stencilBits ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-		}
-
-		if ( vk.hdrActive )
-		{
-			// Preserve emissive energy accumulated in the main pass
-			if ( vk.msaaActive )
-			{
-				attachments[3].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; // emissive resolve
-				attachments[4].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; // msaa emissive
-			}
-			else
-			{
-				attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; // emissive resolve
-			}
-		}
-
-		VK_CHECK( qvkCreateRenderPass( device, &desc, NULL, &vk.render_pass.mainResume ) );
-		SET_OBJECT_NAME( vk.render_pass.mainResume, "render pass - XR main resume (multiview)", VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT );
-		ri.Printf( PRINT_ALL, "Created mainResume render pass: %p\n", (void*)vk.render_pass.mainResume );
 
 		// Reset for non-MSAA passes
 		subpass.pResolveAttachments = NULL;
@@ -1112,16 +1076,16 @@ static void vk_create_render_passes( void )
 			attachments[1].format = depth_format;
 			attachments[1].samples = vkSamples;
 			attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-			attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;  // Store for mainResume after HUD
+			attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;  // nothing reads depth after this pass
 			attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-			attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;  // Store for mainResume after HUD
+			attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 			attachments[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 			attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
 			attachments[2].format = vk.color_format;
 			attachments[2].samples = vkSamples;
 			attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-			attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;  // Store for mainResume after HUD
+			attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;  // resolved into [0]; nothing reads the samples after
 			attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 			attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 			attachments[2].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -1151,7 +1115,7 @@ static void vk_create_render_passes( void )
 			attachments[1].format = depth_format;
 			attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
 			attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-			attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;  // Store for mainResume after HUD
+			attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;  // nothing reads depth after this pass
 			attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 			attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 			attachments[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
@@ -1209,10 +1173,10 @@ static void vk_create_render_passes( void )
 	}
 
 	/*
-	 * HUD Buffer Render Pass (1280x960, single layer, no multiview)
+	 * HUD Buffer Render Passes (1280x960, single layer, no multiview)
 	 * Used for HUD mode 1 (in-world sprite). Depth needed for 3D models.
-	 * [0] Color: LOAD preserves content (1-frame latency)
-	 * [1] Depth: CLEAR each frame, STORE ensures clear completes
+	 * [0] Color: cleared when the caller asks (the cgame and UI brackets), loaded by the console notify bracket
+	 * [1] Depth: cleared every pass and never read after it
 	 */
 	{
 		VkSubpassDependency hudDeps[2];
@@ -1235,7 +1199,8 @@ static void vk_create_render_passes( void )
 		attachments[1].format = depth_format;
 		attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
 		attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-		attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		// Cleared every HUD pass and never read after, so it is never written back
+		attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 		attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 		attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 		attachments[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
@@ -1287,7 +1252,13 @@ static void vk_create_render_passes( void )
 		VK_CHECK( qvkCreateRenderPass( device, &desc, NULL, &vk.render_pass.hudBuffer ) );
 		SET_OBJECT_NAME( vk.render_pass.hudBuffer, "render pass - HUD buffer", VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT );
 
-		ri.Printf( PRINT_ALL, "...HUD buffer render pass created\n" );
+		// A second pass that clears the color instead of loading last frame's HUD;
+		// same attachments and samples, so the pipelines and framebuffer serve both
+		attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		VK_CHECK( qvkCreateRenderPass( device, &desc, NULL, &vk.render_pass.hudBufferClear ) );
+		SET_OBJECT_NAME( vk.render_pass.hudBufferClear, "render pass - HUD buffer, cleared", VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT );
+
+		ri.Printf( PRINT_ALL, "...HUD buffer render passes created\n" );
 	}
 }
 
@@ -4101,12 +4072,14 @@ static void vk_create_sync_primitives( void ) {
 		Com_Memset( &query_desc, 0, sizeof( query_desc ) );
 		query_desc.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
 		query_desc.queryType = VK_QUERY_TYPE_TIMESTAMP;
-		query_desc.queryCount = NUM_COMMAND_BUFFERS * GPU_TIME_MAX_STAMPS;
+		// the frame's run per slot, then the HUD command buffer's own run per slot
+		query_desc.queryCount = NUM_COMMAND_BUFFERS * ( GPU_TIME_MAX_STAMPS + GPU_TIME_HUD_STAMPS );
 		VK_CHECK( qvkCreateQueryPool( vk.device, &query_desc, NULL, &vk.gpuTimePool ) );
 		SET_OBJECT_NAME( vk.gpuTimePool, "gpu time query pool", VK_DEBUG_REPORT_OBJECT_TYPE_QUERY_POOL_EXT );
 	}
 	for ( i = 0; i < NUM_COMMAND_BUFFERS; i++ ) {
 		vk.tess[i].gpu_time_armed = qfalse;
+		vk.tess[i].gpu_time_hud_count = 0;
 		vk.tess[i].gpu_time_scene_marked = qfalse;
 		vk.tess[i].gpu_time_pending = qfalse;
 		vk.tess[i].gpu_time_count = 0;
@@ -4546,6 +4519,11 @@ void vk_initialize( void )
 
 		VK_CHECK( qvkAllocateCommandBuffers( vk.device, &alloc_info, &vk.tess[i].command_buffer ) );
 		SET_OBJECT_NAME( vk.tess[i].command_buffer, va( "tess cmd %i", i ), VK_DEBUG_REPORT_OBJECT_TYPE_COMMAND_BUFFER_EXT );
+
+		// the HUD buffer's own, submitted ahead of the frame's (vk_begin_hud_render_pass)
+		VK_CHECK( qvkAllocateCommandBuffers( vk.device, &alloc_info, &vk.tess[i].hud_command_buffer ) );
+		SET_OBJECT_NAME( vk.tess[i].hud_command_buffer, va( "tess hud cmd %i", i ), VK_DEBUG_REPORT_OBJECT_TYPE_COMMAND_BUFFER_EXT );
+		vk.tess[i].hud_begun = qfalse;
 	}
 
 	// Desktop mirror blit command buffer
@@ -4901,11 +4879,6 @@ static void vk_destroy_render_passes( void )
 		vk.render_pass.main = VK_NULL_HANDLE;
 	}
 
-	if ( vk.render_pass.mainResume != VK_NULL_HANDLE ) {
-		qvkDestroyRenderPass( vk.device, vk.render_pass.mainResume, NULL );
-		vk.render_pass.mainResume = VK_NULL_HANDLE;
-	}
-
 	if ( vk.render_pass.screenmap != VK_NULL_HANDLE ) {
 		qvkDestroyRenderPass( vk.device, vk.render_pass.screenmap, NULL );
 		vk.render_pass.screenmap = VK_NULL_HANDLE;
@@ -4934,10 +4907,14 @@ static void vk_destroy_render_passes( void )
 		vk.render_pass.post_bloom = VK_NULL_HANDLE;
 	}
 
-	// HUD buffer render pass
+	// HUD buffer render passes
 	if ( vk.render_pass.hudBuffer != VK_NULL_HANDLE ) {
 		qvkDestroyRenderPass( vk.device, vk.render_pass.hudBuffer, NULL );
 		vk.render_pass.hudBuffer = VK_NULL_HANDLE;
+	}
+	if ( vk.render_pass.hudBufferClear != VK_NULL_HANDLE ) {
+		qvkDestroyRenderPass( vk.device, vk.render_pass.hudBufferClear, NULL );
+		vk.render_pass.hudBufferClear = VK_NULL_HANDLE;
 	}
 
 	// Virtual screen render pass
@@ -8047,7 +8024,7 @@ static void vk_begin_render_pass( VkRenderPass renderPass, VkFramebuffer frameBu
 }
 
 
-void vk_begin_main_render_pass( qboolean clear )
+void vk_begin_main_render_pass( void )
 {
 	VkRenderPassBeginInfo render_pass_begin_info;
 	VkClearValue clear_values[5];  // [0]=resolve/color, [1]=depth, [2]=MSAA color, [3]=emissive resolve, [4]=emissive msaa
@@ -8069,13 +8046,11 @@ void vk_begin_main_render_pass( qboolean clear )
 	// Q3VR is XR-only: use FBO framebuffer (fboActive always true in VR)
 	frameBuffer = vk.framebuffers.main;
 
-	// Choose render pass based on whether we want to clear or preserve content
-	// main uses LOAD_OP_CLEAR, mainResume uses LOAD_OP_LOAD
-	renderPass = clear ? vk.render_pass.main : vk.render_pass.mainResume;
+	renderPass = vk.render_pass.main;
 
 	// Validate render pass exists
 	if ( renderPass == VK_NULL_HANDLE ) {
-		ri.Printf( PRINT_WARNING, "vk_begin_main_render_pass: render pass not ready (clear=%d)\n", clear );
+		ri.Printf( PRINT_WARNING, "vk_begin_main_render_pass: render pass not ready\n" );
 		return;
 	}
 
@@ -8098,7 +8073,7 @@ void vk_begin_main_render_pass( qboolean clear )
 	render_pass_begin_info.renderArea.extent.width = vk.renderWidth;
 	render_pass_begin_info.renderArea.extent.height = vk.renderHeight;
 
-	if ( clear ) {
+	{
 		// Clear values: [0] = color/resolve (black), [1] = depth (0.0 for reversed depth)
 		// With MSAA: [2] = MSAA color (black)
 		Com_Memset( clear_values, 0, sizeof( clear_values ) );
@@ -8114,16 +8089,12 @@ void vk_begin_main_render_pass( qboolean clear )
 		}
 		render_pass_begin_info.pClearValues = clear_values;
 		vk_world.dirty_depth_attachment = 0;
-	} else {
-		// Resuming after HUD pass: don't clear, preserve existing content
-		render_pass_begin_info.clearValueCount = 0;
-		render_pass_begin_info.pClearValues = NULL;
 	}
 
 	qvkCmdBeginRenderPass( vk.cmd->command_buffer, &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE );
 	vk.inRenderPass = qtrue;
 
-	if ( clear ) {
+	{
 		// Safety net: guarantee the eye color target has DEFINED contents across
 		// its FULL extent on the first 3D pass of the frame. The render-pass
 		// LOAD_OP for the color/resolve target is config-dependent (DONT_CARE when
@@ -8136,10 +8107,9 @@ void vk_begin_main_render_pass( qboolean clear )
 		//
 		// vkCmdClearAttachments clears the rects passed here directly and ignores
 		// the dynamic scissor, so this covers the whole extent regardless of the
-		// view rectangle set later by RB_BeginDrawingView. Only the clear==qtrue
-		// (first) pass does this; the mainResume/HUD LOAD_OP_LOAD passes that
-		// preserve intra-frame content are untouched. For the in-tree cgame (which
-		// fills the eye every frame) this is a negligible, visually invisible clear.
+		// view rectangle set later by RB_BeginDrawingView. For the in-tree cgame
+		// (which fills the eye every frame) this is a negligible, visually
+		// invisible clear.
 		VkClearAttachment clearAttachment;
 		VkClearRect clearRect;
 
@@ -8222,11 +8192,65 @@ void vk_end_render_pass( void )
 
 
 /*
+==================
+vk_reset_command_buffer_caches
+
+Bound state does not carry across command buffers. Vertex buffers need no
+entry: vk_bind_geometry rebinds them every time.
+==================
+*/
+static void vk_reset_command_buffer_caches( void )
+{
+	vk.cmd->last_pipeline = VK_NULL_HANDLE;
+	vk.cmd->depth_range = DEPTH_RANGE_COUNT;
+	vk.cmd->curr_index_buffer = VK_NULL_HANDLE;
+	vk.cmd->curr_index_offset = 0;
+	Com_Memset( vk.cmd->descriptor_set.current, 0, sizeof( vk.cmd->descriptor_set.current ) );
+	vk.cmd->descriptor_set.start = ~0U;
+	vk.cmd->descriptor_set.end = 0;
+	Com_Memset( &vk.cmd->scissor_rect, 0, sizeof( vk.cmd->scissor_rect ) );
+}
+
+
+/*
+==================
+vk_leave_hud_command_buffer
+
+Back to the frame's command buffer; the pass open there is still open.
+==================
+*/
+static void vk_leave_hud_command_buffer( void )
+{
+	if ( !vk.inHudCommandBuffer ) {
+		return;
+	}
+	if ( vk.inRenderPass ) {
+		qvkCmdEndRenderPass( vk.cmd->command_buffer );
+	}
+
+	vk.cmd->command_buffer = vk.hudSaved.commandBuffer;
+	vk.inHudCommandBuffer = qfalse;
+	vk.inRenderPass = vk.hudSaved.inRenderPass;
+	vk.renderPassIndex = vk.hudSaved.renderPassIndex;
+	vk.renderWidth = vk.hudSaved.renderWidth;
+	vk.renderHeight = vk.hudSaved.renderHeight;
+	vk.renderScaleX = vk.hudSaved.renderScaleX;
+	vk.renderScaleY = vk.hudSaved.renderScaleY;
+
+	vk_reset_command_buffer_caches();
+}
+
+
+static void vk_gpu_time_begin_hud( void );
+
+
+/*
  * vk_begin_hud_render_pass - Begin rendering to the HUD buffer
  *
- * Switches to the HUD framebuffer (1280x960) for rendering HUD elements.
- * After HUD rendering is complete, call vk_end_hud_render_pass() to resume
- * the main render pass. The HUD texture can then be sampled via vk.xr.hudDescriptor.
+ * Switches to the HUD framebuffer (1280x960) for rendering HUD elements. The
+ * HUD records into its own command buffer, submitted ahead of the frame's, so
+ * the frame's pass stays open (no store, reload or resume) and the sprite it
+ * draws samples this frame's HUD. The texture is sampled via vk.xr.hudDescriptor.
  */
 void vk_begin_hud_render_pass( qboolean clear )
 {
@@ -8239,25 +8263,46 @@ void vk_begin_hud_render_pass( qboolean clear )
 		return;
 	}
 
-	if ( vk.xr.hudFramebuffer == VK_NULL_HANDLE ) {
+	if ( vk.xr.hudFramebuffer == VK_NULL_HANDLE || vk.render_pass.hudBuffer == VK_NULL_HANDLE ||
+		vk.render_pass.hudBufferClear == VK_NULL_HANDLE ) {
 		ri.Printf( PRINT_WARNING, "vk_begin_hud_render_pass: HUD buffer not initialized\n" );
 		return;
 	}
 
-	// End current render pass if active
-	if ( vk.inRenderPass ) {
-		// Track if we're ending post_bloom: its finalLayout transitions color to SHADER_READ_ONLY
-		// Only post_bloom does this; main keeps color in COLOR_ATTACHMENT
-		if ( vk.renderPassIndex == RENDER_PASS_POST_BLOOM ) {
-			vk.colorNeedsTransitionToAttachment = qtrue;
+	if ( !vk.inHudCommandBuffer ) {
+		// Park the frame's state and record into the HUD command buffer, begun on the frame's first bracket
+		if ( !vk.cmd->hud_begun ) {
+			VkCommandBufferBeginInfo beginInfo;
+
+			beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+			beginInfo.pNext = NULL;
+			beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+			beginInfo.pInheritanceInfo = NULL;
+			VK_CHECK( qvkBeginCommandBuffer( vk.cmd->hud_command_buffer, &beginInfo ) );
+			vk.cmd->hud_begun = qtrue;
+			vk_gpu_time_begin_hud();
 		}
+
+		vk.hudSaved.commandBuffer = vk.cmd->command_buffer;
+		vk.hudSaved.inRenderPass = vk.inRenderPass;
+		vk.hudSaved.renderPassIndex = vk.renderPassIndex;
+		vk.hudSaved.renderWidth = vk.renderWidth;
+		vk.hudSaved.renderHeight = vk.renderHeight;
+		vk.hudSaved.renderScaleX = vk.renderScaleX;
+		vk.hudSaved.renderScaleY = vk.renderScaleY;
+
+		vk.cmd->command_buffer = vk.cmd->hud_command_buffer;
+		vk.inHudCommandBuffer = qtrue;
+		vk.inRenderPass = qfalse;
+		vk_reset_command_buffer_caches();
+	} else if ( vk.inRenderPass ) {
+		// a bracket left open: close its pass before opening the next
 		qvkCmdEndRenderPass( vk.cmd->command_buffer );
 		vk.inRenderPass = qfalse;
 	}
-	vk_gpu_time_stamp( GPU_TIME_HUD_BEGIN );
 
 	// Set up clear values
-	// Color: not cleared here (LOAD_OP_LOAD), but value must be provided for array indexing
+	// Color: transparent black when this pass clears; ignored when it loads
 	clearValues[0].color.float32[0] = 0.0f;
 	clearValues[0].color.float32[1] = 0.0f;
 	clearValues[0].color.float32[2] = 0.0f;
@@ -8267,12 +8312,11 @@ void vk_begin_hud_render_pass( qboolean clear )
 	clearValues[1].depthStencil.depth = 0.0f;
 	clearValues[1].depthStencil.stencil = 0;
 
-	// Set up render pass begin info
-	// Note: We use LOAD_OP_LOAD for color to preserve previous frame's content
-	// (like OpenGL FBO behavior). Depth is cleared each frame for 3D model rendering.
+	// The caller asks for the clear: the cgame and UI brackets do, the console
+	// notify bracket loads what they drew. Depth is cleared every pass for 3D models.
 	Com_Memset( &rpBI, 0, sizeof( rpBI ) );
 	rpBI.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-	rpBI.renderPass = vk.render_pass.hudBuffer;
+	rpBI.renderPass = clear ? vk.render_pass.hudBufferClear : vk.render_pass.hudBuffer;
 	rpBI.framebuffer = vk.xr.hudFramebuffer;
 	rpBI.renderArea.offset.x = 0;
 	rpBI.renderArea.offset.y = 0;
@@ -8300,36 +8344,12 @@ void vk_begin_hud_render_pass( qboolean clear )
 	viewport.maxDepth = 1.0f;
 	qvkCmdSetViewport( vk.cmd->command_buffer, 0, 1, &viewport );
 
-	// Set scissor BEFORE any drawing commands (including vkCmdClearAttachments)
-	// vkCmdClearAttachments uses current scissor state, so it must be set first
+	// Set scissor before any drawing command
 	scissor.offset.x = 0;
 	scissor.offset.y = 0;
 	scissor.extent.width = HUD_BUFFER_WIDTH;
 	scissor.extent.height = HUD_BUFFER_HEIGHT;
 	qvkCmdSetScissor( vk.cmd->command_buffer, 0, 1, &scissor );
-
-	// Manual clear if requested (since we use LOAD_OP_LOAD for color)
-	if ( clear ) {
-		VkClearAttachment clearAttachment;
-		VkClearRect clearRect;
-
-		// Color: transparent black
-		clearAttachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		clearAttachment.colorAttachment = 0;
-		clearAttachment.clearValue.color.float32[0] = 0.0f;
-		clearAttachment.clearValue.color.float32[1] = 0.0f;
-		clearAttachment.clearValue.color.float32[2] = 0.0f;
-		clearAttachment.clearValue.color.float32[3] = 0.0f;
-
-		clearRect.rect.offset.x = 0;
-		clearRect.rect.offset.y = 0;
-		clearRect.rect.extent.width = HUD_BUFFER_WIDTH;
-		clearRect.rect.extent.height = HUD_BUFFER_HEIGHT;
-		clearRect.baseArrayLayer = 0;
-		clearRect.layerCount = 1;
-
-		qvkCmdClearAttachments( vk.cmd->command_buffer, 1, &clearAttachment, 1, &clearRect );
-	}
 
 	vk.cmd->last_pipeline = VK_NULL_HANDLE;
 
@@ -8345,8 +8365,8 @@ void vk_begin_hud_render_pass( qboolean clear )
 /*
  * vk_end_hud_render_pass - End rendering to the HUD buffer
  *
- * Ends the HUD render pass and transitions the HUD image to SHADER_READ_ONLY_OPTIMAL
- * layout (via render pass finalLayout). Then resumes the main XR render pass.
+ * Ends the HUD render pass (finalLayout leaves the image SHADER_READ_ONLY_OPTIMAL)
+ * and returns recording to the frame's command buffer, whose pass is still open.
  */
 void vk_end_hud_render_pass( void )
 {
@@ -8354,26 +8374,12 @@ void vk_end_hud_render_pass( void )
 		return;
 	}
 
-	// End the HUD render pass
 	qvkCmdEndRenderPass( vk.cmd->command_buffer );
 	vk.inRenderPass = qfalse;
 	vk_gpu_time_stamp( GPU_TIME_HUD_END );
 
-	// HUD image is now in SHADER_READ_ONLY_OPTIMAL layout (from render pass finalLayout)
-
-	// If we ended post_bloom when starting HUD, the FBO color was transitioned to SHADER_READ_ONLY
-	// (post_bloom's finalLayout). We need to transition it back to COLOR_ATTACHMENT before
-	// resuming the main render pass. Only do this if we actually ended post_bloom, not main.
-	if ( vk.colorNeedsTransitionToAttachment ) {
-		record_image_layout_transition( vk.cmd->command_buffer,
-			vk.color_image, VK_IMAGE_ASPECT_COLOR_BIT,
-			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0, 0 );
-		vk.colorNeedsTransitionToAttachment = qfalse;
-	}
-
-	// Resume main XR render pass without clearing (preserve existing content)
-	vk_begin_main_render_pass( qfalse );
+	// RENDER_PASS_HUD implies the HUD command buffer: begin sets both, leave restores both
+	vk_leave_hud_command_buffer();
 }
 
 
@@ -8413,6 +8419,13 @@ static void vk_resize_geometry_buffer( void )
 	VK_CHECK( qvkEndCommandBuffer( vk.cmd->command_buffer ) );
 
 	qvkResetCommandBuffer( vk.cmd->command_buffer, 0 );
+
+	// the frame is dropped, its HUD command buffer with it
+	if ( vk.cmd->hud_begun ) {
+		VK_CHECK( qvkEndCommandBuffer( vk.cmd->hud_command_buffer ) );
+		qvkResetCommandBuffer( vk.cmd->hud_command_buffer, 0 );
+		vk.cmd->hud_begun = qfalse;
+	}
 
 	// the buffer is back in the initial state; without this, the next
 	// vk_begin_frame would route it into vk_finish_frame and end/submit a
@@ -8455,7 +8468,7 @@ static int vk_gpu_time_compare( const void *a, const void *b )
 
 
 static const char *gpuTimeLabelNames[GPU_TIME_LABELS] = {
-	"start", "scene", "main end", "bloom", "to hud", "hud", "eye end", "gamma", "end"
+	"start", "scene", "main end", "bloom", "hud", "eye end", "gamma", "end"
 };
 
 
@@ -8466,16 +8479,21 @@ vk_gpu_time_collect
 This slot's stamps from its last frame, readable now that its fence was
 waited on, into the r_gpuTimeLog window; one report per window. Each
 interval goes to the label of the stamp that closes it, summed when a label
-repeats within a frame. The desktop mirror blit is a separate submission and
-is not in the span.
+repeats within a frame. The HUD command buffer, submitted ahead of the frame's,
+keeps its own run and its span is added to the frame's. The desktop mirror
+blit is a separate submission and is not in the span.
 ==================
 */
 static void vk_gpu_time_collect( void )
 {
 	uint64_t results[GPU_TIME_MAX_STAMPS * 2];  // each stamp followed by its availability
+	uint64_t hud[GPU_TIME_HUD_STAMPS * 2];
 	const uint32_t first = vk.cmd_index * GPU_TIME_MAX_STAMPS;
+	const uint32_t firstHud = NUM_COMMAND_BUFFERS * GPU_TIME_MAX_STAMPS + vk.cmd_index * GPU_TIME_HUD_STAMPS;
 	const uint32_t count = vk.cmd->gpu_time_count;
+	const uint32_t hudCount = vk.cmd->gpu_time_hud_count;
 	float sums[GPU_TIME_LABELS];
+	double frameMs;
 	int window, n, i;
 	uint32_t s;
 
@@ -8493,6 +8511,18 @@ static void vk_gpu_time_collect( void )
 			return;
 		}
 	}
+	// The HUD command buffer's own run, when the frame had a bracket; it ran ahead of the frame's
+	if ( hudCount >= 2 ) {
+		if ( qvkGetQueryPoolResults( vk.device, vk.gpuTimePool, firstHud, hudCount, sizeof( hud ), hud,
+				2 * sizeof( uint64_t ), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT ) != VK_SUCCESS ) {
+			return;
+		}
+		for ( s = 0; s < hudCount; s++ ) {
+			if ( !hud[s * 2 + 1] || ( s > 0 && hud[s * 2] < hud[s * 2 - 2] ) ) {
+				return;
+			}
+		}
+	}
 
 	window = r_gpuTimeLog->integer;
 	if ( window <= 0 ) {
@@ -8507,10 +8537,19 @@ static void vk_gpu_time_collect( void )
 	for ( s = 1; s < count; s++ ) {
 		sums[vk.cmd->gpu_time_label[s]] += (float)( (double)( results[s * 2] - results[s * 2 - 2] ) * vk.timestampPeriod * 1e-6 );
 	}
+	frameMs = (double)( results[( count - 1 ) * 2] - results[0] ) * vk.timestampPeriod * 1e-6;
+	if ( hudCount >= 2 ) {
+		for ( s = 1; s < hudCount; s++ ) {
+			sums[vk.cmd->gpu_time_hud_label[s]] += (float)( (double)( hud[s * 2] - hud[s * 2 - 2] ) * vk.timestampPeriod * 1e-6 );
+		}
+		// the two spans summed, not last minus first: any gap between the two
+		// buffers is queue time this frame did not spend on the GPU
+		frameMs += (double)( hud[( hudCount - 1 ) * 2] - hud[0] ) * vk.timestampPeriod * 1e-6;
+	}
 	for ( i = 0; i < GPU_TIME_LABELS; i++ ) {
 		vk.gpuTime.label[i][vk.gpuTime.count] = sums[i];
 	}
-	vk.gpuTime.ms[vk.gpuTime.count++] = (float)( (double)( results[( count - 1 ) * 2] - results[0] ) * vk.timestampPeriod * 1e-6 );
+	vk.gpuTime.ms[vk.gpuTime.count++] = (float)frameMs;
 	if ( vk.gpuTime.count < window ) {
 		return;
 	}
@@ -8537,6 +8576,7 @@ static void vk_gpu_time_begin( void )
 	const uint32_t first = vk.cmd_index * GPU_TIME_MAX_STAMPS;
 
 	vk.cmd->gpu_time_count = 0;
+	vk.cmd->gpu_time_hud_count = 0;
 	if ( vk.gpuTimePool == VK_NULL_HANDLE || r_gpuTimeLog->integer <= 0 ) {
 		return;
 	}
@@ -8551,6 +8591,30 @@ static void vk_gpu_time_begin( void )
 
 /*
 ==================
+vk_gpu_time_begin_hud
+
+Top of the slot's HUD command buffer, begun on the frame's first bracket. It
+runs before the frame's buffer resets the slot's stamps, so it resets and
+starts a run of its own.
+==================
+*/
+static void vk_gpu_time_begin_hud( void )
+{
+	const uint32_t first = NUM_COMMAND_BUFFERS * GPU_TIME_MAX_STAMPS + vk.cmd_index * GPU_TIME_HUD_STAMPS;
+
+	vk.cmd->gpu_time_hud_count = 0;
+	if ( !vk.cmd->gpu_time_armed ) {
+		return;
+	}
+	qvkCmdResetQueryPool( vk.cmd->hud_command_buffer, vk.gpuTimePool, first, GPU_TIME_HUD_STAMPS );
+	qvkCmdWriteTimestamp( vk.cmd->hud_command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, vk.gpuTimePool, first );
+	vk.cmd->gpu_time_hud_label[0] = GPU_TIME_START;
+	vk.cmd->gpu_time_hud_count = 1;
+}
+
+
+/*
+==================
 vk_gpu_time_stamp
 
 Closes the interval that began at the previous stamp under the given label.
@@ -8558,7 +8622,20 @@ Closes the interval that began at the previous stamp under the given label.
 */
 void vk_gpu_time_stamp( gpuTimeLabel_t label )
 {
-	if ( !vk.cmd || !vk.cmd->gpu_time_armed || !vk.recordingCommands || vk.cmd->gpu_time_count >= GPU_TIME_MAX_STAMPS ) {
+	if ( !vk.cmd || !vk.cmd->gpu_time_armed || !vk.recordingCommands ) {
+		return;
+	}
+	if ( vk.inHudCommandBuffer ) {
+		// inside a bracket vk.cmd->command_buffer is the HUD buffer, with its own run
+		if ( vk.cmd->gpu_time_hud_count == 0 || vk.cmd->gpu_time_hud_count >= GPU_TIME_HUD_STAMPS ) {
+			return;
+		}
+		qvkCmdWriteTimestamp( vk.cmd->command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, vk.gpuTimePool,
+			NUM_COMMAND_BUFFERS * GPU_TIME_MAX_STAMPS + vk.cmd_index * GPU_TIME_HUD_STAMPS + vk.cmd->gpu_time_hud_count );
+		vk.cmd->gpu_time_hud_label[vk.cmd->gpu_time_hud_count++] = (byte)label;
+		return;
+	}
+	if ( vk.cmd->gpu_time_count >= GPU_TIME_MAX_STAMPS ) {
 		return;
 	}
 	qvkCmdWriteTimestamp( vk.cmd->command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, vk.gpuTimePool,
@@ -8633,6 +8710,8 @@ void vk_begin_frame( uint32_t colorIndex )
 	// Rotate to next command buffer
 	vk.cmd_index = (vk.cmd_index + 1) % NUM_COMMAND_BUFFERS;
 	vk.cmd = &vk.tess[ vk.cmd_index ];
+	vk.cmd->hud_begun = qfalse;
+	vk.inHudCommandBuffer = qfalse;
 
 	// Wait for this command buffer's previous work to complete
 	if ( vk.cmd->waitForFence ) {
@@ -8772,7 +8851,7 @@ void vk_begin_frame( uint32_t colorIndex )
 	backEnd.screenMapDone = qfalse;
 
 	// XR always uses the main multiview render pass: no screenmap in VR
-	vk_begin_main_render_pass( qtrue );  // Clear framebuffer at start of frame
+	vk_begin_main_render_pass();  // Clear framebuffer at start of frame
 
 	// Reset dynamic buffers for new frame
 	vk.cmd->uniform_read_offset = 0;
@@ -8808,11 +8887,16 @@ void vk_end_frame( void )
 	qboolean useVirtualScreen = qfalse;
 	qboolean mirrorEnabled;
 	extern cvar_t *vr_desktopMode;
+	VkCommandBuffer buffers[2];
+	uint32_t bufferCount = 0;
 
 	if ( vk.frame_count == 0 && !vk.recordingCommands )
 		return;
 
 	vk.frame_count = 0;
+
+	// a HUD bracket left open closes here; everything below is on the frame's command buffer
+	vk_leave_hud_command_buffer();
 
 	// Handle geometry buffer resize if needed
 	if ( vk.geometry_buffer_size_new ) {
@@ -8850,7 +8934,7 @@ void vk_end_frame( void )
 
 		// Transition FBO color to shader read for gamma pass
 		// If we just ended post_bloom: FBO is already in SHADER_READ_ONLY_OPTIMAL (from finalLayout)
-		// Otherwise (main, mainResume, or HUD after bloom): FBO is in COLOR_ATTACHMENT_OPTIMAL, needs transition
+		// Otherwise (main): FBO is in COLOR_ATTACHMENT_OPTIMAL, needs transition
 		if ( vk.renderPassIndex != RENDER_PASS_POST_BLOOM ) {
 			record_image_layout_transition( vk.cmd->command_buffer,
 				vk.color_image, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -8880,6 +8964,11 @@ void vk_end_frame( void )
 
 	// Only proceed if we're actually recording commands
 	if ( !vk.recordingCommands ) {
+		// nothing will submit the HUD buffer now; end it so the next frame can begin it
+		if ( vk.cmd->hud_begun ) {
+			VK_CHECK( qvkEndCommandBuffer( vk.cmd->hud_command_buffer ) );
+			vk.cmd->hud_begun = qfalse;
+		}
 		vk.renderPassIndex = RENDER_PASS_MAIN;
 		return;
 	}
@@ -8899,8 +8988,16 @@ void vk_end_frame( void )
 		submit_info.waitSemaphoreCount = 0;
 		submit_info.pWaitSemaphores = NULL;
 		submit_info.pWaitDstStageMask = NULL;
-		submit_info.commandBufferCount = 1;
-		submit_info.pCommandBuffers = &vk.cmd->command_buffer;
+		// The HUD command buffer goes first: the frame's samples what it drew. The HUD
+		// pass's external dependencies order the two; both complete under the one fence.
+		if ( vk.cmd->hud_begun ) {
+			VK_CHECK( qvkEndCommandBuffer( vk.cmd->hud_command_buffer ) );
+			buffers[bufferCount++] = vk.cmd->hud_command_buffer;
+			vk.cmd->hud_begun = qfalse;
+		}
+		buffers[bufferCount++] = vk.cmd->command_buffer;
+		submit_info.commandBufferCount = bufferCount;
+		submit_info.pCommandBuffers = buffers;
 
 		if ( mirrorEnabled && !vk_is_window_minimized() && vk.swapchain != VK_NULL_HANDLE ) {
 			submit_info.signalSemaphoreCount = 1;
@@ -8950,6 +9047,11 @@ This ensures render passes are ended and command buffers are properly submitted.
 void vk_finish_frame( void )
 {
 	VkSubmitInfo submit_info;
+	VkCommandBuffer buffers[2];
+	uint32_t bufferCount = 0;
+
+	// a HUD bracket cut short closes first; the frame's pass is dealt with below
+	vk_leave_hud_command_buffer();
 
 	if ( vk_end_interrupted_pass() ) {
 		vk_gpu_time_end();
@@ -8957,19 +9059,32 @@ void vk_finish_frame( void )
 		VK_CHECK( qvkEndCommandBuffer( vk.cmd->command_buffer ) );
 		vk.recordingCommands = qfalse;
 
+		if ( vk.cmd->hud_begun ) {
+			VK_CHECK( qvkEndCommandBuffer( vk.cmd->hud_command_buffer ) );
+			buffers[bufferCount++] = vk.cmd->hud_command_buffer;
+			vk.cmd->hud_begun = qfalse;
+		}
+		buffers[bufferCount++] = vk.cmd->command_buffer;
+
 		// Submit with fence so we can wait for completion
 		submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 		submit_info.pNext = NULL;
 		submit_info.waitSemaphoreCount = 0;
 		submit_info.pWaitSemaphores = NULL;
 		submit_info.pWaitDstStageMask = NULL;
-		submit_info.commandBufferCount = 1;
-		submit_info.pCommandBuffers = &vk.cmd->command_buffer;
+		submit_info.commandBufferCount = bufferCount;
+		submit_info.pCommandBuffers = buffers;
 		submit_info.signalSemaphoreCount = 0;
 		submit_info.pSignalSemaphores = NULL;
 
 		VK_CHECK( qvkQueueSubmit( vk.queue, 1, &submit_info, vk.cmd->rendering_finished_fence ) );
 		vk.cmd->waitForFence = qtrue;
+	}
+
+	// the false branch above submitted nothing, so the HUD buffer is still open
+	if ( vk.cmd->hud_begun ) {
+		VK_CHECK( qvkEndCommandBuffer( vk.cmd->hud_command_buffer ) );
+		vk.cmd->hud_begun = qfalse;
 	}
 
 	// Reset frame tracking
@@ -8991,9 +9106,16 @@ destroy, with attachments possibly left mid-pass (VUID-vkCmdDraw-None-09600).
 */
 void vk_discard_frame( void )
 {
+	vk_leave_hud_command_buffer();
+
 	if ( vk_end_interrupted_pass() ) {
 		VK_CHECK( qvkEndCommandBuffer( vk.cmd->command_buffer ) );
 		vk.recordingCommands = qfalse;
+	}
+	// The HUD command buffer is never submitted; its next begin resets it
+	if ( vk.cmd->hud_begun ) {
+		VK_CHECK( qvkEndCommandBuffer( vk.cmd->hud_command_buffer ) );
+		vk.cmd->hud_begun = qfalse;
 	}
 	// never submitted, so there is nothing to read back
 	vk.cmd->gpu_time_armed = qfalse;
@@ -13149,7 +13271,7 @@ static qboolean vk_recreate_xr_render_pass( VkFormat colorFormat, VkFormat depth
 		attachments[1].format = vk.depth_format;
 		attachments[1].samples = vkSamples;
 		attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-		// Must STORE because mainResume uses LOAD_OP_LOAD on all attachments
+		// Must STORE: post_bloom LOADs depth
 		attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 		attachments[1].stencilLoadOp = glConfig.stencilBits ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 		attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -13164,7 +13286,7 @@ static qboolean vk_recreate_xr_render_pass( VkFormat colorFormat, VkFormat depth
 #else
 		attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 #endif
-		// Must STORE because mainResume uses LOAD_OP_LOAD on all attachments
+		// Must STORE: post_bloom LOADs the samples
 		attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 		attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 		attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -13205,7 +13327,7 @@ static qboolean vk_recreate_xr_render_pass( VkFormat colorFormat, VkFormat depth
 			attachments[4].format = VK_FORMAT_R16G16B16A16_SFLOAT;
 			attachments[4].samples = vkSamples;
 			attachments[4].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-			attachments[4].storeOp = VK_ATTACHMENT_STORE_OP_STORE; // Needed for mainResume
+			attachments[4].storeOp = VK_ATTACHMENT_STORE_OP_STORE; // post_bloom loads it
 			attachments[4].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 			attachments[4].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 			attachments[4].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -13249,7 +13371,7 @@ static qboolean vk_recreate_xr_render_pass( VkFormat colorFormat, VkFormat depth
 		attachments[1].format = vk.depth_format;
 		attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
 		attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-		// Must STORE because post_bloom and mainResume use LOAD_OP_LOAD on depth
+		// Must STORE: post_bloom LOADs depth
 		attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 		attachments[1].stencilLoadOp = glConfig.stencilBits ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 		attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -13292,8 +13414,8 @@ static qboolean vk_recreate_xr_render_pass( VkFormat colorFormat, VkFormat depth
 		}
 	}
 
-	// Subpass dependencies: includes depth stages for mainResume which uses
-	// LOAD_OP_LOAD on depth after HUD pass (FBO depth must be synchronized)
+	// Subpass dependencies: include depth stages so an earlier frame's depth
+	// work finishes before this pass clears
 	deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
 	deps[0].dstSubpass = 0;
 	deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
@@ -13331,48 +13453,6 @@ static qboolean vk_recreate_xr_render_pass( VkFormat colorFormat, VkFormat depth
 	VK_CHECK( qvkCreateRenderPass( vk.device, &desc, NULL, &vk.render_pass.main ) );
 	SET_OBJECT_NAME( vk.render_pass.main, "render pass - XR main (multiview, recreated)", VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT );
 	ri.Printf( PRINT_ALL, "Recreated main render pass: %p (attachments: %d)\n", (void*)vk.render_pass.main, attachmentCount );
-
-	// Also destroy and recreate mainResume render pass
-	if ( vk.render_pass.mainResume != VK_NULL_HANDLE ) {
-		qvkDestroyRenderPass( vk.device, vk.render_pass.mainResume, NULL );
-		vk.render_pass.mainResume = VK_NULL_HANDLE;
-	}
-
-	// mainResume: same as main but LOAD_OP_LOAD to preserve content after HUD pass
-	// initialLayout must NOT be UNDEFINED with LOAD_OP_LOAD
-	if ( vk.msaaActive ) {
-		// MSAA mode: load all 3 attachments
-		attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-		attachments[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-		attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-		attachments[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-		attachments[1].stencilLoadOp = glConfig.stencilBits ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-		attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-		attachments[2].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-	} else {
-		// Non-MSAA mode: load color and depth (main pass stored depth)
-		attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-		attachments[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-		attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-		attachments[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-		attachments[1].stencilLoadOp = glConfig.stencilBits ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	}
-
-	if ( vk.hdrActive ) {
-		// Preserve emissive energy accumulated in the main pass; initialLayouts set above
-		// in the main branch are non-UNDEFINED, as LOAD_OP_LOAD requires.
-		if ( vk.msaaActive ) {
-			attachments[3].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; // emissive resolve
-			attachments[4].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; // msaa emissive
-		} else {
-			attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; // emissive resolve
-		}
-	}
-
-	// mainResume uses same deps as main (both now include depth synchronization)
-	VK_CHECK( qvkCreateRenderPass( vk.device, &desc, NULL, &vk.render_pass.mainResume ) );
-	SET_OBJECT_NAME( vk.render_pass.mainResume, "render pass - XR main resume (multiview, recreated)", VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT );
-	ri.Printf( PRINT_ALL, "Recreated mainResume render pass: %p\n", (void*)vk.render_pass.mainResume );
 
 	// Recreate gamma render pass with UNORM format (outputs to XR swapchain via UNORM view)
 	// The gamma shader outputs sRGB-encoded values directly, so we use UNORM format

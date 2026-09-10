@@ -92,6 +92,14 @@ static void VR_VK_DestroySwapchain(VR_VK_SwapchainInfo* info)
 		return;
 	}
 
+	// OpenXR requires every acquired image released before the swapchain is
+	// destroyed, and a restart mid-frame arrives with one held
+	if (info->swapchain != XR_NULL_HANDLE && info->acquired) {
+		XrSwapchainImageReleaseInfo releaseInfo = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO, NULL};
+		xrReleaseSwapchainImage(info->swapchain, &releaseInfo);
+		info->acquired = XR_FALSE;
+	}
+
 	// Free images array (we don't own the VkImages themselves: OpenXR does)
 	if (info->images) {
 		free(info->images);
@@ -214,6 +222,8 @@ void VR_VK_Swapchains_Acquire(VR_SwapchainInfos* swapchains, uint32_t* colorInde
 	CHECK(
 		!XR_FAILED(xrWaitSwapchainImage(swapchains->color.swapchain, &waitInfo)),
 		"Failed to wait for color swapchain image");
+
+	swapchains->color.acquired = XR_TRUE;
 }
 
 void VR_VK_Swapchains_Release(VR_SwapchainInfos* swapchains)
@@ -226,6 +236,8 @@ void VR_VK_Swapchains_Release(VR_SwapchainInfos* swapchains)
 	XR_CHECK(
 		xrReleaseSwapchainImage(swapchains->color.swapchain, &releaseInfo),
 		"Failed to release color swapchain image");
+
+	swapchains->color.acquired = XR_FALSE;
 }
 
 //

@@ -21,4 +21,7 @@ void VR_Renderer_RestoreState( VR_Engine* engine );
 // Submit VR frame during loading if needed (returns qtrue if a frame was submitted)
 qboolean VR_Renderer_SubmitLoadingFrame(VR_Engine* engine);
 
+// About to draw: acquire this frame's image and begin the renderer's XR frame
+void VR_Renderer_BeginRender( VR_Engine* engine );
+
 #endif

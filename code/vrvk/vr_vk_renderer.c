@@ -398,14 +398,9 @@ static void VR_Renderer_BeginFrame(VR_Engine* engine, XrBool32 needsRecenter)
 
 	VR_SwapchainInfos* swapchains = engine->appState.Renderer.Swapchains;
 
-	// Acquire XR color swapchain (depth is native Vulkan buffer, not from OpenXR)
-	VR_VK_Swapchains_Acquire(swapchains, &swapchainColorIndex);
-
-	// Begin XR rendering: sets up Vulkan command buffer and binds XR framebuffers
-	re.BeginXRFrame(swapchainColorIndex);
-
-	// Clear framebuffer
-	VR_ClearFrameBuffer(swapchains->color.width, swapchains->color.height);
+	// Images are acquired only when something is about to be drawn
+	// (VR_Renderer_BeginRender): a frame that draws nothing holds none, and
+	// the compositor keeps showing the last released image, not a held one
 
 	// Set renderer params
 	// Near plane must be in Quake units to match our view matrices
@@ -513,10 +508,13 @@ static void VR_Renderer_EndFrame(VR_Engine* engine)
 		}
 	}
 
-	// Blit XR content to desktop window BEFORE releasing swapchains.
-	re.SwapDesktopWindow();
-
-	VR_VK_Swapchains_Release(swapchains);
+	// Only a frame that drew holds an image. The mirror blits from it before
+	// the release; after the release it belongs to the runtime
+	if (swapchains->color.acquired)
+	{
+		re.SwapDesktopWindow();
+		VR_VK_Swapchains_Release(swapchains);
+	}
 
 	VR_EndFrame(
 		engine->appState.Session,
@@ -635,6 +633,36 @@ static XrDesktopViewConfiguration VR_GetDesktopViewConfiguration(void)
 			return BOTH_EYES;
 	}
 	return LEFT_EYE;
+}
+
+
+/*
+==================
+VR_Renderer_BeginRender
+
+About to draw: acquire this frame's image and begin the renderer's XR frame.
+Called from the screen update rather than the frame begin so a frame that
+draws nothing holds no image; the compositor then keeps showing the image
+last released instead of a held one with the ring's stale contents.
+==================
+*/
+void VR_Renderer_BeginRender(VR_Engine* engine)
+{
+	VR_SwapchainInfos* swapchains = engine ? engine->appState.Renderer.Swapchains : NULL;
+
+	if (!frameStarted || !swapchains || swapchains->color.acquired)
+	{
+		return;
+	}
+
+	// Acquire XR color swapchain (depth is native Vulkan buffer, not from OpenXR)
+	VR_VK_Swapchains_Acquire(swapchains, &swapchainColorIndex);
+
+	// Begin XR rendering: sets up Vulkan command buffer and binds XR framebuffers
+	re.BeginXRFrame(swapchainColorIndex);
+
+	// Clear framebuffer
+	VR_ClearFrameBuffer(swapchains->color.width, swapchains->color.height);
 }
 
 

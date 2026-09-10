@@ -304,7 +304,7 @@ void vk_discard_frame( void ); // End an interrupted frame without submitting it
 void vk_present_desktop_mirror( void );  // Desktop mirror: acquire, blit, present
 
 void vk_end_render_pass( void );
-void vk_begin_main_render_pass( qboolean clear );
+void vk_begin_main_render_pass( void );
 void vk_begin_hud_render_pass( qboolean clear );
 void vk_end_hud_render_pass( void );
 qboolean vk_create_hud_buffer( void );
@@ -331,8 +331,7 @@ typedef enum {
 	GPU_TIME_SCENE,		// 3D draws up to the 3D-to-2D boundary
 	GPU_TIME_MAIN_END,	// the scene pass's store and resolve
 	GPU_TIME_BLOOM,		// bloom extract and the blur chain
-	GPU_TIME_HUD_BEGIN,	// eye buffer drawing up to a HUD bracket, and the store it forces
-	GPU_TIME_HUD_END,	// the HUD buffer pass
+	GPU_TIME_HUD_END,	// the HUD buffer pass, in its own command buffer
 	GPU_TIME_EYE_END,	// the eye buffer's last pass, 2D and its store
 	GPU_TIME_GAMMA,		// the gamma pass
 	GPU_TIME_END,		// virtual screen and whatever else precedes the end
@@ -340,6 +339,7 @@ typedef enum {
 } gpuTimeLabel_t;
 
 #define GPU_TIME_MAX_STAMPS 16
+#define GPU_TIME_HUD_STAMPS 6	// the HUD command buffer's own run: its start and up to five passes
 
 void vk_gpu_time_stamp( gpuTimeLabel_t label );
 void vk_gpu_time_mark_scene( void );  // the 3D-to-2D boundary, once per frame
@@ -369,6 +369,8 @@ void VBO_ClearQueue( void );
 
 typedef struct vk_tess_s {
 	VkCommandBuffer command_buffer;
+	VkCommandBuffer hud_command_buffer;  // the HUD buffer's own, submitted ahead of command_buffer
+	qboolean		hud_begun;
 
 	VkSemaphore image_acquired;
 	uint32_t	swapchain_image_index;
@@ -385,6 +387,9 @@ typedef struct vk_tess_s {
 	qboolean gpu_time_pending;
 	uint32_t gpu_time_count;		// stamps written this frame, the start included
 	byte gpu_time_label[GPU_TIME_MAX_STAMPS];
+	// the HUD command buffer runs before command_buffer resets the slot's stamps, so it keeps its own
+	uint32_t gpu_time_hud_count;
+	byte gpu_time_hud_label[GPU_TIME_HUD_STAMPS];
 
 	VkBuffer vertex_buffer;
 	byte *vertex_buffer_ptr; // pointer to mapped vertex buffer
@@ -568,13 +573,13 @@ typedef struct {
 
 	struct {
 		VkRenderPass main;        // Multiview main rendering (clears framebuffer)
-		VkRenderPass mainResume;  // Multiview resume (preserves framebuffer)
 		VkRenderPass screenmap;
 		VkRenderPass gamma;       // Multiview gamma correction (if r_fbo)
 		VkRenderPass bloom_extract; // Multiview bloom extraction
 		VkRenderPass blur[VK_NUM_BLOOM_PASSES*2]; // Multiview blur passes
 		VkRenderPass post_bloom;  // Multiview post-bloom blend
-		VkRenderPass hudBuffer;   // HUD buffer (1280x960, single layer, color+depth)
+		VkRenderPass hudBuffer;       // HUD buffer (1280x960, single layer, color+depth), color loaded
+		VkRenderPass hudBufferClear;  // same, color cleared on load: the first HUD pass of a frame
 		VkRenderPass virtualScreen; // Virtual screen (multiview, color+depth, no MSAA)
 	} render_pass;
 
@@ -838,7 +843,17 @@ typedef struct {
 	qboolean inRenderPass;		// true when actually inside a render pass
 	qboolean recordingCommands;	// true when command buffer is recording (between Begin/End)
 	qboolean descriptorsReady;	// qfalse between vk_release_resources() and vk_init_descriptors(): pool contents are dead
-	qboolean colorNeedsTransitionToAttachment;	// true after ending post_bloom (color in SHADER_READ_ONLY)
+
+	// HUD brackets record into vk.cmd->hud_command_buffer, submitted ahead of
+	// the frame's, so an open pass never has to be resumed; frame state parks here
+	qboolean inHudCommandBuffer;
+	struct {
+		VkCommandBuffer commandBuffer;
+		qboolean inRenderPass;
+		renderPass_t renderPassIndex;
+		uint32_t renderWidth, renderHeight;
+		float renderScaleX, renderScaleY;
+	} hudSaved;
 
 	uint32_t screenMapWidth;
 	uint32_t screenMapHeight;
