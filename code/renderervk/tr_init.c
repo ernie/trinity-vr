@@ -2116,6 +2116,7 @@ static void RE_EndRegistration( void ) {
 	vk_wait_idle();
 	// command buffer is not in recording state at this stage
 	// so we can't issue RB_ShowImages() there
+	R_PrintImageLoadStats();
 #else
 	R_IssuePendingRenderCommands();
 	if ( !ri.Sys_LowPhysicalMemory() ) {

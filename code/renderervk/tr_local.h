@@ -1633,6 +1633,7 @@ void	R_SkinList_f( void );
 void	R_InitFogTable( void );
 float	R_FogFactor( float s, float t );
 void	R_InitImages( void );
+void	R_PrintImageLoadStats( void );
 void	R_DeleteTextures( void );
 int		R_SumOfUsedImages( void );
 #ifdef USE_VULKAN

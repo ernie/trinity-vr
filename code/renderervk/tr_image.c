@@ -751,12 +751,35 @@ static void generate_image_upload_data( image_t *image, byte *data, Image_Upload
 }
 
 
+// Cost of the images loaded since R_InitImages, printed by RE_EndRegistration
+static struct {
+	int		count;
+	double	megabytes;
+	int		readMs;		// file read and decode
+	int		mipMs;		// resample and mipmap generation
+	int		uploadMs;
+} imageLoadStats;
+
+void R_PrintImageLoadStats( void ) {
+	if ( imageLoadStats.count ) {
+		ri.Printf( PRINT_ALL, "Images: %i loaded (%.0f MB), read+decode %i ms, mipmap %i ms, upload %i ms\n",
+			imageLoadStats.count, imageLoadStats.megabytes,
+			imageLoadStats.readMs, imageLoadStats.mipMs, imageLoadStats.uploadMs );
+	}
+	Com_Memset( &imageLoadStats, 0, sizeof( imageLoadStats ) );
+}
+
+
 static void upload_vk_image( image_t *image, byte *pic ) {
 
 	Image_Upload_Data upload_data;
 	int w, h;
+	int t0, t1;
 
+	t0 = ri.Milliseconds();
 	generate_image_upload_data( image, pic, &upload_data );
+	t1 = ri.Milliseconds();
+	imageLoadStats.mipMs += t1 - t0;
 
 	w = upload_data.base_level_width;
 	h = upload_data.base_level_height;
@@ -774,6 +797,7 @@ static void upload_vk_image( image_t *image, byte *pic ) {
 
 	vk_create_image( image, w, h, upload_data.mip_levels );
 	vk_upload_image_data( image, 0, 0, w, h, upload_data.mip_levels, upload_data.buffer, upload_data.buffer_size, qfalse );
+	imageLoadStats.uploadMs += ri.Milliseconds() - t1;
 
 	ri.Hunk_FreeTempMemory( upload_data.buffer );
 }
@@ -1295,10 +1319,16 @@ image_t	*R_FindImageFile( const char *name, imgFlags_t flags )
 	//
 	// load the pic from disk
 	//
-	localName = R_LoadImage( name, &pic, &width, &height );
+	{
+		int t0 = ri.Milliseconds();
+		localName = R_LoadImage( name, &pic, &width, &height );
+		imageLoadStats.readMs += ri.Milliseconds() - t0;
+	}
 	if ( pic == NULL ) {
 		return NULL;
 	}
+	imageLoadStats.count++;
+	imageLoadStats.megabytes += (double)width * height * 4 / ( 1024.0 * 1024.0 );
 
 	if ( tr.mapLoading && r_mapGreyScale->value > 0 ) {
 		byte *img;
@@ -1737,6 +1767,7 @@ void R_InitImages( void ) {
 #endif
 
 	Com_Memset( hashTable, 0, sizeof( hashTable ) );
+	Com_Memset( &imageLoadStats, 0, sizeof( imageLoadStats ) );
 
 	// build brightness translation tables
 	R_SetColorMappings();

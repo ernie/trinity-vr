@@ -22,6 +22,9 @@ float VR_GetHapticsIntensity(void)
 //0 = left, 1 = right
 float vibration_channel_duration[2] = {0.0f, 0.0f};
 float vibration_channel_intensity[2] = {0.0f, 0.0f};
+// Stop an idle channel once, not every update: PICO logs every stop call and
+// the loading loop runs thousands of updates a second
+static qboolean vibration_channel_active[2] = {qfalse, qfalse};
 
 void VR_Vibrate(int duration, int chan, float intensity)
 {
@@ -69,6 +72,7 @@ void VR_ProcessHaptics(void)
 			hapticActionInfo.next = NULL;
 			hapticActionInfo.action = i == 0 ? vibrateLeftFeedback : vibrateRightFeedback;
 			OXR(xrApplyHapticFeedback(session, &hapticActionInfo, (const XrHapticBaseHeader*)&vibration));
+			vibration_channel_active[i] = qtrue;
 
 			if (vibration_channel_duration[i] != -1.0f)
 			{
@@ -81,7 +85,7 @@ void VR_ProcessHaptics(void)
 				}
 			}
 		}
-		else
+		else if (vibration_channel_active[i])
 		{
 			// Stop haptics
 			XrHapticActionInfo hapticActionInfo = {};
@@ -89,6 +93,7 @@ void VR_ProcessHaptics(void)
 			hapticActionInfo.next = NULL;
 			hapticActionInfo.action = i == 0 ? vibrateLeftFeedback : vibrateRightFeedback;
 			OXR(xrStopHapticFeedback(session, &hapticActionInfo));
+			vibration_channel_active[i] = qfalse;
 		}
 	}
 }

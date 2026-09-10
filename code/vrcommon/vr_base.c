@@ -29,34 +29,66 @@ qboolean vr_shutdown = qfalse;
 static const char* requiredExtensionNames[MAX_REQUIRED_EXTENSIONS];
 static uint32_t numRequiredExtensions = 0;
 
-VR_Bool VR_HasInstanceExtension(const char* name)
+// Instance extensions the runtime advertises, enumerated once per VR_Init
+static XrExtensionProperties* s_instanceExtensions = NULL;
+static uint32_t s_numInstanceExtensions = 0;
+
+static void VR_LogLine(const char* line)
+{
+	fprintf(stderr, "[OpenXR] %s\n", line);
+}
+
+// Logged as one block so a runtime's capabilities can be read off a single capture
+static void VR_EnumerateInstanceExtensions(void)
 {
 	uint32_t count = 0;
+	uint32_t i;
+	char line[256];
+
+	free(s_instanceExtensions);
+	s_instanceExtensions = NULL;
+	s_numInstanceExtensions = 0;
+
 	if (xrEnumerateInstanceExtensionProperties(NULL, 0, &count, NULL) != XR_SUCCESS || count == 0) {
-		return VR_FALSE;
+		VR_LogLine("instance extensions: none enumerated");
+		return;
 	}
 
-	XrExtensionProperties* props = (XrExtensionProperties*)malloc(sizeof(XrExtensionProperties) * count);
-	if (!props) {
-		return VR_FALSE;
+	s_instanceExtensions = (XrExtensionProperties*)malloc(sizeof(XrExtensionProperties) * count);
+	if (!s_instanceExtensions) {
+		VR_LogLine("instance extensions: allocation failed");
+		return;
 	}
-	for (uint32_t i = 0; i < count; ++i) {
-		props[i].type = XR_TYPE_EXTENSION_PROPERTIES;
-		props[i].next = NULL;
+	for (i = 0; i < count; ++i) {
+		s_instanceExtensions[i].type = XR_TYPE_EXTENSION_PROPERTIES;
+		s_instanceExtensions[i].next = NULL;
 	}
+	if (xrEnumerateInstanceExtensionProperties(NULL, count, &count, s_instanceExtensions) != XR_SUCCESS) {
+		free(s_instanceExtensions);
+		s_instanceExtensions = NULL;
+		VR_LogLine("instance extensions: enumeration failed");
+		return;
+	}
+	s_numInstanceExtensions = count;
 
-	VR_Bool found = VR_FALSE;
-	if (xrEnumerateInstanceExtensionProperties(NULL, count, &count, props) == XR_SUCCESS) {
-		for (uint32_t i = 0; i < count; ++i) {
-			if (strcmp(props[i].extensionName, name) == 0) {
-				found = VR_TRUE;
-				break;
-			}
+	Com_sprintf(line, sizeof(line), "instance extensions (%u):", count);
+	VR_LogLine(line);
+	for (i = 0; i < count; ++i) {
+		Com_sprintf(line, sizeof(line), "  %s (v%u)",
+			s_instanceExtensions[i].extensionName, s_instanceExtensions[i].extensionVersion);
+		VR_LogLine(line);
+	}
+}
+
+VR_Bool VR_HasInstanceExtension(const char* name)
+{
+	uint32_t i;
+	for (i = 0; i < s_numInstanceExtensions; ++i) {
+		if (strcmp(s_instanceExtensions[i].extensionName, name) == 0) {
+			return VR_TRUE;
 		}
 	}
-
-	free(props);
-	return found;
+	return VR_FALSE;
 }
 
 static void VR_BuildExtensionList(void)
@@ -76,6 +108,11 @@ static void VR_BuildExtensionList(void)
 	if ( numRequiredExtensions < MAX_REQUIRED_EXTENSIONS &&
 		VR_HasInstanceExtension( "XR_FB_color_space" ) )
 		requiredExtensionNames[numRequiredExtensions++] = "XR_FB_color_space";
+
+	// PICO's native controller profiles; a strict runtime rejects their paths unless enabled
+	if ( numRequiredExtensions < MAX_REQUIRED_EXTENSIONS &&
+		VR_HasInstanceExtension( "XR_BD_controller_interaction" ) )
+		requiredExtensionNames[numRequiredExtensions++] = "XR_BD_controller_interaction";
 }
 
 // Part of init
@@ -114,21 +151,22 @@ VR_Engine* VR_Init( void )
 
 	vr.follow_mode = VRFM_THIRDPERSON_1;
 
-	// Build extension list with appropriate graphics API extension
+	VR_EnumerateInstanceExtensions();
 	VR_BuildExtensionList();
 
 	fprintf(stderr, "[OpenXR] Initializing OpenXR instance and system...\n");
 
-	const qboolean listApLayersExtensions = qfalse;
-	if (listApLayersExtensions)
+	const qboolean listApiLayers = qfalse;
+	if (listApiLayers)
 	{
 		VR_ListAPILayers();
-		VR_ListExtensions();
 	}
 
 	// Create the OpenXR instance.
+	// Meta's runtime reads the patch version as the app's SDK and gives 1.0.0 a
+	// legacy profile that ignores the XrSwapchainCreateInfo next chain
 	const char* appName = "Quake 3 Arena";
-	const XrVersion apiVersion = XR_MAKE_VERSION(1, 0, 0);
+	const XrVersion apiVersion = XR_API_VERSION_1_0;
 	XR_CHECK(
 		VR_CreateInstance(appName, apiVersion, numRequiredExtensions, requiredExtensionNames, &vr_engine.appState.Instance), 
 		"Failed to create OpenXR instance");
@@ -199,6 +237,9 @@ void VR_Destroy( VR_Engine* engine )
 		VR_DestroyDebugUtilsMessenger(engine->appState.Instance, &engine->appState.DebugUtilsMessenger);
 		xrDestroyInstance(engine->appState.Instance);
 		memset(&vr_engine, 0, sizeof(vr_engine));
+		free(s_instanceExtensions);
+		s_instanceExtensions = NULL;
+		s_numInstanceExtensions = 0;
 		vr_graphicsInitialized = qfalse;
 	}
 	vr_initialized = qfalse;

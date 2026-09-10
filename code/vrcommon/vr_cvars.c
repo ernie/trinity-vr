@@ -18,6 +18,7 @@ cvar_t *vr_weaponPitch = NULL;
 cvar_t *vr_twoHandedWeapons = NULL;
 cvar_t *vr_showItemInHand = NULL;
 cvar_t *vr_refreshrate = NULL;
+cvar_t *vr_refreshrates = NULL;
 cvar_t *vr_superSampling = NULL;
 cvar_t *vr_weaponScope = NULL;
 cvar_t *vr_6dof = NULL;
@@ -61,11 +62,13 @@ void VR_InitCvars( void )
 	vr_switchThumbsticks = Cvar_Get ("vr_switchThumbsticks", "0", CVAR_ARCHIVE);
 	vr_snapturn = Cvar_Get ("vr_snapturn", "45", CVAR_ARCHIVE);
 	vr_directionMode = Cvar_Get ("vr_directionMode", "1", CVAR_ARCHIVE); // 0 = HMD, 1 = Off-hand
-	vr_weaponPitch = Cvar_Get ("vr_weaponPitch", "-20", CVAR_ARCHIVE);
+	// Degrees on top of the fixed VR_GRIP_TO_AIM_PITCH correction; zero is no personal adjustment
+	vr_weaponPitch = Cvar_Get ("vr_weaponPitch", "0", CVAR_ARCHIVE);
 	vr_heightAdjust = Cvar_Get ("vr_heightAdjust", "0.0", CVAR_ARCHIVE);
 	vr_twoHandedWeapons = Cvar_Get ("vr_twoHandedWeapons", "0", CVAR_ARCHIVE);
 	vr_showItemInHand = Cvar_Get ("vr_showItemInHand", "1", CVAR_ARCHIVE);
 	vr_refreshrate = Cvar_Get ("vr_refreshrate", "90", CVAR_ARCHIVE);
+	vr_refreshrates = Cvar_Get ("vr_refreshrates", "", CVAR_ROM);	// space-separated rates the runtime supports, for the UI
 	vr_superSampling = Cvar_Get ("vr_superSampling", "1.0", CVAR_ARCHIVE);
 	vr_weaponScope = Cvar_Get ("vr_weaponScope", "1", CVAR_ARCHIVE);
 	vr_6dof = Cvar_Get ("vr_6dof", "1", CVAR_ARCHIVE); // 0 - fake 6DoF in SP, 1 - true 6DoF in SP

@@ -7304,6 +7304,14 @@ void vk_clear_color( const vec4_t color ) {
 	if ( !vk.active )
 		return;
 
+	// Don't issue commands if we're not recording (e.g., during RE_Shutdown transition)
+	if ( !vk.recordingCommands )
+		return;
+
+	// Must be inside a render pass to clear attachments
+	if ( !vk.inRenderPass )
+		return;
+
 	attachment.colorAttachment = 0;
 	attachment.clearValue.color.float32[0] = color[0];
 	attachment.clearValue.color.float32[1] = color[1];
@@ -7793,6 +7801,11 @@ void vk_bind_lighting( int stage, int bundle )
 {
 	bind_base = -1;
 	bind_count = 0;
+
+	// Don't issue commands if we're not recording (e.g., during RE_Shutdown transition)
+	if ( !vk.recordingCommands ) {
+		return;
+	}
 
 #ifdef USE_VBO
 	if ( tess.vboIndex ) {

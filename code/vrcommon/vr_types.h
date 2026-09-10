@@ -30,10 +30,14 @@ typedef XrBool32 VR_Bool;
 // The struct is defined in vrvk/vr_vk_types.h
 typedef struct VR_SwapchainInfos_s VR_SwapchainInfos;
 
+#define VR_MAX_REFRESH_RATES 16
+
 typedef struct
 {
 	VR_SwapchainInfos* Swapchains;  // Pointer to graphics-specific swapchain info
 	float RefreshRate;
+	float SupportedRefreshRates[VR_MAX_REFRESH_RATES]; // as enumerated from the runtime
+	uint32_t NumSupportedRefreshRates;
 } VR_Renderer;
 
 typedef struct

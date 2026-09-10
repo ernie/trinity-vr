@@ -92,6 +92,11 @@ typedef struct vr_clientinfo_s {
 	vec3_t weaponposition;
 
 	vec3_t offhandangles;
+
+	// From the runtime's aim pose, free of vr_weaponPitch, so the menu cursor
+	// does not move when the weapon is tuned
+	vec3_t weaponaimangles;
+	vec3_t offhandaimangles;
 	vec3_t offhandangles2;
 	vec3_t offhandoffset;
 	vec3_t offhandoffset_last[2];
