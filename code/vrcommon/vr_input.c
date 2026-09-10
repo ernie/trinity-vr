@@ -48,6 +48,7 @@ XrAction thumbrestLeftTouchAction;
 XrAction thumbrestRightTouchAction;
 XrAction vibrateLeftFeedback;
 XrAction vibrateRightFeedback;
+XrAction eyeGazeAction;
 XrActionSet runningActionSet;
 // Weapon pose, bound to grip: aim is a pointing ray, not the basis an object
 // is held with, and the model comes out rolled when driven by it
@@ -57,6 +58,15 @@ XrSpace rightControllerGripSpace = XR_NULL_HANDLE;
 // Aim pose, for the menu cursor only, so it never inherits the weapon's pitch offset
 XrSpace leftControllerAimSpace = XR_NULL_HANDLE;
 XrSpace rightControllerAimSpace = XR_NULL_HANDLE;
+
+// Eye gaze, for foveation centers; XR_NULL_HANDLE whenever gaze is unavailable
+XrSpace eyeGazeSpace = XR_NULL_HANDLE;
+
+// Read back out by the gaze log in VR_EnsureGraphicsInitialized: the suggestion
+// runs before Com_Init, too early for anything here to report the outcome itself.
+// Only the code that actually suggests a binding moves this off "not attempted",
+// so an action that failed to create cannot be mistaken for an accepted binding
+static const char* eyeGazeBindingState = "not attempted";
 
 qboolean inputInitialized = qfalse;
 qboolean useSimpleProfile = qfalse;
@@ -674,6 +684,16 @@ void VR_InitInstanceInput( VR_Engine* engine )
 	aimPoseLeftAction = CreateAction(runningActionSet, XR_ACTION_TYPE_POSE_INPUT, "aim_pose_left", NULL, 1, &leftHandPath);
 	aimPoseRightAction = CreateAction(runningActionSet, XR_ACTION_TYPE_POSE_INPUT, "aim_pose_right", NULL, 1, &rightHandPath);
 
+	// This function runs again on every instance rebuild: a handle left over from
+	// the destroyed instance must not reach xrCreateActionSpace, and an outcome
+	// recorded against that instance must not be reported for the new one
+	eyeGazeAction = XR_NULL_HANDLE;
+	eyeGazeBindingState = "not attempted";
+	if (VR_HasEyeGazeSupport())
+	{
+		eyeGazeAction = CreateAction(runningActionSet, XR_ACTION_TYPE_POSE_INPUT, "eye_gaze", "Eye Gaze", 0, NULL);
+	}
+
 	XrPath interactionProfilePath = XR_NULL_PATH;
 	XrPath interactionProfilePathValveIndex = XR_NULL_PATH;
 	XrPath interactionProfilePathOculusTouch = XR_NULL_PATH;
@@ -878,6 +898,34 @@ void VR_InitInstanceInput( VR_Engine* engine )
 			printf("[OpenXR] xrSuggestInteractionProfileBindings failed for the chosen profile (%d): controls will not work\n", (int)suggestResult);
 		}
 	}
+
+	// Eye gaze is its own interaction profile, so it gets its own suggestion:
+	// folded into a controller profile's bindings the runtime would reject the whole set
+	if (VR_HasEyeGazeSupport() && eyeGazeAction != XR_NULL_HANDLE)
+	{
+		XrActionSuggestedBinding gazeBinding = ActionSuggestedBinding(eyeGazeAction, "/user/eyes_ext/input/gaze_ext/pose");
+		XrPath gazeProfile = XR_NULL_PATH;
+		OXR(xrStringToPath(engine->appState.Instance, "/interaction_profiles/ext/eye_gaze_interaction", &gazeProfile));
+
+		XrInteractionProfileSuggestedBinding suggestedBindings = {};
+		suggestedBindings.type = XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING;
+		suggestedBindings.next = NULL;
+		suggestedBindings.interactionProfile = gazeProfile;
+		suggestedBindings.suggestedBindings = &gazeBinding;
+		suggestedBindings.countSuggestedBindings = 1;
+		XrResult suggestGazeResult = xrSuggestInteractionProfileBindings(engine->appState.Instance, &suggestedBindings);
+		if (!XR_SUCCEEDED(suggestGazeResult))
+		{
+			// Never fatal: a runtime that advertises the extension but refuses the profile
+			// has to fall back to fixed centers, not take the process down with it
+			eyeGazeBindingState = "refused";
+			eyeGazeAction = XR_NULL_HANDLE;
+		}
+		else
+		{
+			eyeGazeBindingState = "accepted";
+		}
+	}
 }
 
 void VR_InitSessionInput( VR_Engine* engine )
@@ -977,13 +1025,29 @@ void VR_InitSessionInput( VR_Engine* engine )
 	attachInfo.actionSets = &runningActionSet;
 	XR_CHECK(xrAttachSessionActionSets(engine->appState.Session, &attachInfo), "");
 
+	if (eyeGazeAction != XR_NULL_HANDLE)
+	{
+		eyeGazeSpace = CreateActionSpace(eyeGazeAction, XR_NULL_PATH);
+	}
+
 	inputInitialized = qtrue;
+}
+
+XrSpace VR_GetEyeGazeSpace( void )
+{
+	return eyeGazeSpace;
+}
+
+const char* VR_EyeGazeBindingState( void )
+{
+	return eyeGazeBindingState;
 }
 
 void VR_DestroySessionInput( VR_Engine* engine )
 {
 	// This will allow to recreate session-specific OpenXR input objects
 	inputInitialized = qfalse;
+	eyeGazeSpace = XR_NULL_HANDLE;
 }
 
 static void IN_VRController( qboolean isRightController, XrPosef pose )

@@ -9,6 +9,10 @@ void VR_InitInstanceInput( VR_Engine* engine );
 void VR_InitSessionInput( VR_Engine* engine );
 void VR_DestroySessionInput( VR_Engine* engine );
 
+// Eye gaze pose space, XR_NULL_HANDLE whenever gaze is unavailable
+XrSpace VR_GetEyeGazeSpace( void );
+const char* VR_EyeGazeBindingState( void );
+
 // Render loop
 void VR_RefreshDerivedModeState( void );
 void VR_ProcessInputActions( void );

@@ -9,6 +9,7 @@
 
 #include "vr_bhaptics.h"
 #include "vr_debug.h"
+#include "vr_input.h"
 #include "vr_instance.h"
 #include "vr_macros.h"
 #include "vr_session.h"
@@ -128,10 +129,20 @@ const char* VR_GetDeclaredApiVersion(void)
 const char* VR_FoveationCapsString(void)
 {
 	const VR_VulkanDeviceInfo* info = VR_Vulkan_GetDeviceInfo();
-	if (info && info->shadingRateSupported) {
-		return "fixed";
+	if (!info || !info->shadingRateSupported) {
+		return "none";
 	}
-	return "none";
+	// Gaze without a shading-rate attachment is still "none" above -- there
+	// is nothing to steer.
+	return VR_HasEyeGazeSupport() ? "eyetracked" : "fixed";
+}
+
+// The runtime advertising the extension and the headset having eye tracking
+// are different failure modes with the same required outcome, so both must hold.
+qboolean VR_HasEyeGazeSupport(void)
+{
+	return (VR_HasEnabledInstanceExtension(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME) &&
+		vr_engine.systemProperties.SupportsEyeGaze) ? qtrue : qfalse;
 }
 
 static void VR_BuildExtensionList(void)
@@ -156,6 +167,10 @@ static void VR_BuildExtensionList(void)
 	if ( numRequiredExtensions < MAX_REQUIRED_EXTENSIONS &&
 		VR_HasInstanceExtension( "XR_BD_controller_interaction" ) )
 		requiredExtensionNames[numRequiredExtensions++] = "XR_BD_controller_interaction";
+
+	if ( numRequiredExtensions < MAX_REQUIRED_EXTENSIONS &&
+		VR_HasInstanceExtension( XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME ) )
+		requiredExtensionNames[numRequiredExtensions++] = XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME;
 }
 
 // Part of init
@@ -186,6 +201,17 @@ void VR_EnsureGraphicsInitialized( void )
 	// back into VR_InitCvars: VR_FoveationCapsString reports "none" on its
 	// own if VR_Graphics_Init just failed, so this is correct either way.
 	Cvar_Set2( "vr_foveationCaps", VR_FoveationCapsString(), qtrue );
+
+	// Logged here rather than beside VR_GetSystemProperties in VR_Init: that call
+	// happens before Com_Init, while com_logfile is still NULL, so Com_Printf's
+	// logfile write would silently never reach qconsole.log. This is the only
+	// record of whether a given runtime and headset offer gaze, and of what became
+	// of the binding VR_InitInstanceInput suggested -- decided back in VR_Init, in
+	// that same too-early region, which is why vr_input.c has to hold the answer.
+	Com_Printf( "[OpenXR] Eye gaze: extension %s, system support %s, binding %s\n",
+		VR_HasEnabledInstanceExtension( XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME ) ? "yes" : "no",
+		vr_engine.systemProperties.SupportsEyeGaze ? "yes" : "no",
+		VR_EyeGazeBindingState() );
 
 	vr_graphicsInitialized = qtrue;
 }

@@ -1,6 +1,7 @@
 #ifndef __VR_BASE
 #define __VR_BASE
 
+#include "../qcommon/q_shared.h"
 #include "vr_types.h"
 
 // Whether the OpenXR runtime advertises a given instance extension.
@@ -18,10 +19,13 @@ const char *VR_GetRuntimeDescription( void );
 // Empty string before VR_Init has created the instance.
 const char *VR_GetDeclaredApiVersion( void );
 
-// "none" or "fixed": what foveated rendering the Vulkan device can do.
-// "none" before the device exists. Plan B adds "eyetracked" once the gaze
-// arm exists; written so that case is added, not rewritten.
+// "none", "fixed" or "eyetracked": what foveated rendering the Vulkan device
+// can do. "none" before the device exists.
 const char *VR_FoveationCapsString( void );
+
+// Whether the runtime advertised XR_EXT_eye_gaze_interaction AND the system
+// reports it actually tracks eyes. False before VR_Init has queried either.
+qboolean VR_HasEyeGazeSupport( void );
 
 VR_Engine* VR_Init( void );
 VR_Engine* VR_GetEngine( void );

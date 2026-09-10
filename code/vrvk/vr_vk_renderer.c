@@ -314,8 +314,6 @@ void VR_ProcessFrame(VR_Engine* engine)
 		VR_ApplyRefreshRate(engine);
 	}
 
-	VR_VK_Foveation_Frame(engine);
-
 	VR_Renderer_BeginFrame(engine, needsRecenter);
 	Com_Frame();
 	VR_Renderer_EndFrame(engine);
@@ -398,6 +396,13 @@ static void VR_Renderer_BeginFrame(VR_Engine* engine, XrBool32 needsRecenter)
 	// Update zoom level after input processing so weapon_zoomLevel
 	// matches weapon_zoomed (set during IN_VRUpdateControllers)
 	VR_UpdatePerFrameState();
+
+	// Needs this frame's FOV (from IN_VRUpdateHMD above), this frame's synced
+	// action state for the gaze space to be locatable (IN_VRSyncActions), and
+	// this frame's zoom state (IN_VRUpdateControllers, applied by
+	// VR_UpdatePerFrameState just above). lastPredictedDisplayTime is fixed
+	// for the whole function, so it doesn't constrain where this call sits.
+	VR_VK_Foveation_Frame(engine, lastPredictedDisplayTime);
 
 	VR_SwapchainInfos* swapchains = engine->appState.Renderer.Swapchains;
 

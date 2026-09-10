@@ -90,6 +90,10 @@ typedef struct
 typedef struct
 {
 	XrSystemProperties SystemProperties;
+	// Copied out of the XrSystemEyeGazeInteractionPropertiesEXT next-chain
+	// struct before it goes out of scope; VR_FALSE unless the extension was
+	// enabled on the instance.
+	VR_Bool SupportsEyeGaze;
 	// Graphics requirements are stored in graphics-specific code
 } VR_SystemProperties;
 

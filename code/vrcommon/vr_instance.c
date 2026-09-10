@@ -5,6 +5,7 @@
 
 #include "../qcommon/q_shared.h"
 
+#include "vr_base.h"
 #include "vr_macros.h"
 
 XrResult VR_CreateInstance(const char* app_name, XrVersion api_version, uint32_t extensionsCount, const char* const* extensions, XrInstance* instance)
@@ -46,12 +47,26 @@ XrResult VR_GetHMDSystem(XrInstance instance, XrSystemId* systemId)
 
 XrResult VR_GetSystemProperties(XrInstance instance, XrSystemId systemId, VR_SystemProperties* systemProperties)
 {
+	const VR_Bool eyeGazeExtensionEnabled = VR_HasEnabledInstanceExtension(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
+
+	// Scoped to this call; supportsEyeGazeInteraction is copied out below
+	// before the chain that holds it goes out of scope.
+	XrSystemEyeGazeInteractionPropertiesEXT gazeProperties;
+	memset(&gazeProperties, 0, sizeof(gazeProperties));
+	gazeProperties.type = XR_TYPE_SYSTEM_EYE_GAZE_INTERACTION_PROPERTIES_EXT;
+
 	systemProperties->SystemProperties.type = XR_TYPE_SYSTEM_PROPERTIES;
-	systemProperties->SystemProperties.next = NULL;
+	// A runtime is entitled to reject an unrecognized next struct, so this is
+	// only chained when the extension was actually enabled on the instance.
+	systemProperties->SystemProperties.next = eyeGazeExtensionEnabled ? &gazeProperties : NULL;
 
 	XR_CHECK(
 		xrGetSystemProperties(instance, systemId, &systemProperties->SystemProperties),
 		"Failed to get SystemProperties");
+
+	systemProperties->SupportsEyeGaze = eyeGazeExtensionEnabled ? gazeProperties.supportsEyeGazeInteraction : VR_FALSE;
+	// systemProperties outlives this call; it must not keep a pointer into a dead stack frame.
+	systemProperties->SystemProperties.next = NULL;
 
 	// Graphics requirements are fetched separately via VR_Graphics_GetRequirements()
 
