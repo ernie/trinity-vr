@@ -828,7 +828,7 @@ typedef struct {
 	qboolean samplerAnisotropy;
 	qboolean fragmentStores;
 	qboolean dedicatedAllocation;
-	qboolean debugMarkers;
+	qboolean debugNames;
 	qboolean multiviewSupported;   // VK_KHR_multiview available
 	qboolean depthClamp;           // depth clamp for z-fail shadow volumes
 

@@ -45,6 +45,13 @@ typedef struct {
 
     // VK_EXT_swapchain_colorspace enabled on the instance (needed for HDR desktop mirror)
     VkBool32 swapchainColorspaceEnabled;
+
+    // Object naming for validation captures. VK_EXT_debug_utils is an instance
+    // extension the loader advertises whether or not a layer is loaded, and
+    // this flag reflects only that: it was advertised and requested at
+    // instance creation, not confirmed enabled by the runtime. With no layer
+    // listening the names simply go nowhere either way.
+    VkBool32 debugUtilsEnabled;
 } VR_VulkanState;
 
 // Global VR Vulkan state
@@ -80,6 +87,7 @@ typedef struct {
     VkQueue queue;
     uint32_t queueFamilyIndex;
     VkBool32 swapchainColorspaceEnabled;  // VK_EXT_swapchain_colorspace enabled on the instance
+    VkBool32 debugUtilsEnabled;           // VK_EXT_debug_utils advertised by the loader, requested at instance creation
 } VR_VulkanDeviceInfo;
 
 // Get the XR-created Vulkan device for renderer initialization

@@ -136,6 +136,7 @@ const VR_VulkanDeviceInfo* VR_Vulkan_GetDeviceInfo(void)
     info.queue = vr_vk.queue;
     info.queueFamilyIndex = vr_vk.queueFamilyIndex;
     info.swapchainColorspaceEnabled = vr_vk.swapchainColorspaceEnabled;
+    info.debugUtilsEnabled = vr_vk.debugUtilsEnabled;
     return &info;
 }
 
@@ -219,27 +220,42 @@ XrResult VR_Vulkan_CreateInstance(XrInstance xrInstance, XrSystemId systemId)
 
     uint32_t availExtCount = 0;
     VkBool32 colorspaceSupported = VK_FALSE;
-    vkEnumerateInstanceExtensionProperties(NULL, &availExtCount, NULL);
+    VkBool32 debugUtilsSupported = VK_FALSE;
+    VkBool32 scanned = VK_FALSE;
+    VkResult scanResult = vkEnumerateInstanceExtensionProperties(NULL, &availExtCount, NULL);
     if (availExtCount > 0) {
         VkExtensionProperties* availExts = (VkExtensionProperties*)malloc(
             sizeof(VkExtensionProperties) * availExtCount);
         if (availExts) {
-            vkEnumerateInstanceExtensionProperties(NULL, &availExtCount, availExts);
-            for (uint32_t i = 0; i < availExtCount; i++) {
-                if (strcmp(availExts[i].extensionName,
-                           VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME) == 0) {
-                    colorspaceSupported = VK_TRUE;
-                    break;
+            scanResult = vkEnumerateInstanceExtensionProperties(NULL, &availExtCount, availExts);
+            if (scanResult == VK_SUCCESS) {
+                for (uint32_t i = 0; i < availExtCount; i++) {
+                    if (strcmp(availExts[i].extensionName,
+                               VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME) == 0) {
+                        colorspaceSupported = VK_TRUE;
+                    } else if (strcmp(availExts[i].extensionName,
+                                      VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == 0) {
+                        debugUtilsSupported = VK_TRUE;
+                    }
                 }
+                scanned = VK_TRUE;
             }
             free(availExts);
         }
+    }
+    // A scan that never ran leaves every optional extension below looking absent,
+    // and downstream reports that as the runtime not offering it. Only this call
+    // can tell a refused query from a genuinely missing name, so it says so when
+    // it fails and stays quiet when it succeeds.
+    if (!scanned) {
+        Com_Printf("[VRVK] Instance extension scan failed: %u listed, result %d\n",
+                   availExtCount, (int)scanResult);
     }
 
     // Our extensions:
     // - VK_KHR_surface + platform surface for desktop mirror window
     // - VK_EXT_swapchain_colorspace when available (enables HDR on desktop mirror)
-    // - VK_EXT_debug_utils in debug builds
+    // - VK_EXT_debug_utils when available (names Vulkan objects for a capture)
     const char* extensions[8];
     uint32_t extensionCount = 0;
     extensions[extensionCount++] = VK_KHR_SURFACE_EXTENSION_NAME;
@@ -248,13 +264,14 @@ XrResult VR_Vulkan_CreateInstance(XrInstance xrInstance, XrSystemId systemId)
 #endif
     if (colorspaceSupported) {
         extensions[extensionCount++] = VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME;
-        fprintf(stdout, "[VRVK] VK_EXT_swapchain_colorspace available; requesting it\n");
+        Com_Printf("[VRVK] VK_EXT_swapchain_colorspace available; requesting it\n");
     }
-#ifdef _DEBUG
-    extensions[extensionCount++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
-#endif
+    if (debugUtilsSupported) {
+        extensions[extensionCount++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    }
 
     vr_vk.swapchainColorspaceEnabled = colorspaceSupported;
+    vr_vk.debugUtilsEnabled = debugUtilsSupported;
 
     // Application info
     VkApplicationInfo appInfo = {
@@ -395,23 +412,34 @@ static VkBool32 VR_Vulkan_DeviceExtensionSupported(const char* name)
     uint32_t count = 0;
     VkExtensionProperties* props;
     VkBool32 found = VK_FALSE;
+    VkResult result;
 
-    if (vkEnumerateDeviceExtensionProperties(vr_vk.physicalDevice, NULL, &count, NULL) != VK_SUCCESS || count == 0) {
+    // Every failure below answers "not supported", so the result and the count
+    // travel with the answer; otherwise a refused query reads as an absent name
+    result = vkEnumerateDeviceExtensionProperties(vr_vk.physicalDevice, NULL, &count, NULL);
+    if (result != VK_SUCCESS || count == 0) {
+        Com_Printf("[VRVK] Device extension %s: nothing to scan, %u listed, result %d\n",
+                   name, count, (int)result);
         return VK_FALSE;
     }
 
     props = (VkExtensionProperties*)malloc(sizeof(VkExtensionProperties) * count);
     if (props == NULL) {
+        Com_Printf("[VRVK] Device extension %s: no memory for %u properties\n", name, count);
         return VK_FALSE;
     }
 
-    if (vkEnumerateDeviceExtensionProperties(vr_vk.physicalDevice, NULL, &count, props) == VK_SUCCESS) {
+    result = vkEnumerateDeviceExtensionProperties(vr_vk.physicalDevice, NULL, &count, props);
+    if (result == VK_SUCCESS) {
         for (uint32_t i = 0; i < count; i++) {
             if (strcmp(props[i].extensionName, name) == 0) {
                 found = VK_TRUE;
                 break;
             }
         }
+    } else {
+        Com_Printf("[VRVK] Device extension %s: second scan failed, %u listed, result %d\n",
+                   name, count, (int)result);
     }
 
     free(props);
@@ -420,15 +448,17 @@ static VkBool32 VR_Vulkan_DeviceExtensionSupported(const char* name)
 
 XrResult VR_Vulkan_CreateDevice(XrInstance xrInstance, XrSystemId systemId)
 {
-    // Our required extensions: runtime will add any additional ones via xrCreateVulkanDeviceKHR
-    const char* extensions[] = {
-        VK_KHR_MULTIVIEW_EXTENSION_NAME,  // For stereo rendering
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME,  // For desktop mirror window
-        VK_KHR_MAINTENANCE_4_EXTENSION_NAME,  // Relaxes push constant validation
-        VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME,    // Render pass form the depth resolve needs
-        VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME,  // Main pass resolves depth for the post pass
-    };
-    uint32_t extensionCount = sizeof(extensions) / sizeof(extensions[0]);
+    // Our required extensions: runtime will add any additional ones via xrCreateVulkanDeviceKHR.
+    // Fixed capacity with an explicit count, so that a conditional request below
+    // cannot run off the end of an initializer-sized array without a diagnostic.
+    const char* extensions[8];
+    uint32_t extensionCount = 0;
+
+    extensions[extensionCount++] = VK_KHR_MULTIVIEW_EXTENSION_NAME;               // For stereo rendering
+    extensions[extensionCount++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;               // For desktop mirror window
+    extensions[extensionCount++] = VK_KHR_MAINTENANCE_4_EXTENSION_NAME;           // Relaxes push constant validation
+    extensions[extensionCount++] = VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME;     // Render pass form the depth resolve needs
+    extensions[extensionCount++] = VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME;   // Main pass resolves depth for the post pass
 
     // Both are Vulkan 1.2 core and present on every part that runs a PCVR
     // runtime, and the renderer has no path without them

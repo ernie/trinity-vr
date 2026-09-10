@@ -59,6 +59,9 @@ static PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR	qvkGetPhysicalDeviceSurface
 static PFN_vkGetPhysicalDeviceSurfaceFormatsKHR			qvkGetPhysicalDeviceSurfaceFormatsKHR;
 static PFN_vkGetPhysicalDeviceSurfacePresentModesKHR	qvkGetPhysicalDeviceSurfacePresentModesKHR;
 static PFN_vkGetPhysicalDeviceSurfaceSupportKHR			qvkGetPhysicalDeviceSurfaceSupportKHR;
+static PFN_vkSetDebugUtilsObjectNameEXT					qvkSetDebugUtilsObjectNameEXT;
+static PFN_vkCreateDebugUtilsMessengerEXT				qvkCreateDebugUtilsMessengerEXT;
+static PFN_vkDestroyDebugUtilsMessengerEXT				qvkDestroyDebugUtilsMessengerEXT;
 #ifdef USE_VK_VALIDATION
 static PFN_vkCreateDebugReportCallbackEXT				qvkCreateDebugReportCallbackEXT;
 static PFN_vkDestroyDebugReportCallbackEXT				qvkDestroyDebugReportCallbackEXT;
@@ -156,8 +159,6 @@ static PFN_vkQueuePresentKHR							qvkQueuePresentKHR;
 
 static PFN_vkGetBufferMemoryRequirements2KHR			qvkGetBufferMemoryRequirements2KHR;
 static PFN_vkGetImageMemoryRequirements2KHR				qvkGetImageMemoryRequirements2KHR;
-
-static PFN_vkDebugMarkerSetObjectNameEXT				qvkDebugMarkerSetObjectNameEXT;
 
 ////////////////////////////////////////////////////////////////////////////
 
@@ -507,21 +508,75 @@ static void record_image_layout_transition( VkCommandBuffer command_buffer, VkIm
 }
 
 
-// debug markers
+// object names
 #define SET_OBJECT_NAME(obj,objName,objType) vk_set_object_name( (uint64_t)(obj), (objName), (objType) )
+
+// The two enumerations agree on every value from UNKNOWN through COMMAND_POOL
+// and part company above it, where debug_report numbers the WSI types in
+// sequence and VkObjectType gives them their extension ranges. Every type this
+// renderer names is in the shared run; anything outside it is named without a
+// type, which debug_utils allows, rather than named as the wrong one.
+static VkObjectType vk_object_type( VkDebugReportObjectTypeEXT objType )
+{
+	if ( (unsigned)objType <= (unsigned)VK_DEBUG_REPORT_OBJECT_TYPE_COMMAND_POOL_EXT ) {
+		return (VkObjectType)objType;
+	}
+
+	return VK_OBJECT_TYPE_UNKNOWN;
+}
 
 static void vk_set_object_name( uint64_t obj, const char *objName, VkDebugReportObjectTypeEXT objType )
 {
-	if ( qvkDebugMarkerSetObjectNameEXT && obj )
+	// vk_shutdown destroys the device before it zeroes the vk struct, and clears
+	// the instance entry points after both, so the raw pointer stays live across
+	// a window in which vk.device is already gone. vk.debugNames falls in the
+	// same memset that clears vk.device, so gating on the flag rather than on
+	// the pointer alone is what keeps a late call out of that window.
+	if ( vk.debugNames && qvkSetDebugUtilsObjectNameEXT && obj )
 	{
-		VkDebugMarkerObjectNameInfoEXT info;
-		info.sType = VK_STRUCTURE_TYPE_DEBUG_MARKER_OBJECT_NAME_INFO_EXT;
+		VkDebugUtilsObjectNameInfoEXT info;
+		info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
 		info.pNext = NULL;
-		info.objectType = objType;
-		info.object = obj;
+		info.objectType = vk_object_type( objType );
+		info.objectHandle = obj;
 		info.pObjectName = objName;
-		qvkDebugMarkerSetObjectNameEXT( vk.device, &info );
+		qvkSetDebugUtilsObjectNameEXT( vk.device, &info );
 	}
+}
+
+
+// vkGetInstanceProcAddr resolving vkSetDebugUtilsObjectNameEXT proves only
+// that the entry point exists; it proves nothing about whether a validation
+// layer is actually in the chain for this instance. Three rounds of reading
+// a capture that showed no object names spent real time unable to tell
+// whether naming was broken or there was simply nothing named to report. A
+// messenger callback firing at least once settles it: it can only run
+// inside a layer that is receiving.
+//
+// It is created in ordinary runs too, where no validation layer is loaded,
+// no callback ever fires, and it costs nothing beyond the create/destroy
+// pair at startup and shutdown.
+static VkDebugUtilsMessengerEXT vk_debug_messenger = VK_NULL_HANDLE;
+static qboolean vk_messenger_receiving = qfalse;
+
+// Invoked inline by the layer on whichever thread made the Vulkan call, so it
+// must not re-enter Vulkan and must not allocate. ri.Printf does neither: it
+// formats into a stack buffer and hands it to the console and qconsole.log.
+// This renderer has no render thread, so the client's own calls all arrive on
+// one thread; a report the runtime provokes from another would at worst
+// interleave a line, never crash.
+static VKAPI_ATTR VkBool32 VKAPI_CALL vk_debug_messenger_callback(
+	VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+	VkDebugUtilsMessageTypeFlagsEXT messageTypes,
+	const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData,
+	void *pUserData )
+{
+	if ( !vk_messenger_receiving ) {
+		vk_messenger_receiving = qtrue;
+		ri.Printf( PRINT_ALL, "[VK] debug messenger receiving\n" );
+	}
+
+	return VK_FALSE;
 }
 
 
@@ -2317,6 +2372,9 @@ static void init_vulkan_library( void )
 	vk.queue_family_index = xrDevice->queueFamilyIndex;
 	vk_instance = xrDevice->instance;
 	vk.hdrColorspaceExt = xrDevice->swapchainColorspaceEnabled ? qtrue : qfalse;
+	// Gates the entry point every SET_OBJECT_NAME call goes through; without it
+	// those calls return early and a capture names bare handles
+	vk.debugNames = xrDevice->debugUtilsEnabled ? qtrue : qfalse;
 
 	ri.Printf( PRINT_ALL, "[VK] Using VR-provided Vulkan device\n" );
 
@@ -2475,8 +2533,48 @@ static void init_vulkan_library( void )
 		}
 	}
 
-	if ( vk.debugMarkers ) {
-		INIT_DEVICE_FUNCTION_EXT(vkDebugMarkerSetObjectNameEXT)
+	// An extension that was never enabled and an entry point that did not load
+	// both leave a capture unnamed, and one line cannot be read back as either.
+	// The entry point comes from the instance: debug_utils is an instance
+	// extension, and vkGetDeviceProcAddr is not required to answer for one.
+	if ( vk.debugNames ) {
+		INIT_INSTANCE_FUNCTION_EXT(vkSetDebugUtilsObjectNameEXT)
+		vk.debugNames = qvkSetDebugUtilsObjectNameEXT ? qtrue : qfalse;
+		ri.Printf( PRINT_ALL, "...object naming: %s\n", vk.debugNames ? "enabled"
+			: "unavailable, vkSetDebugUtilsObjectNameEXT did not load" );
+
+		// The messenger and the naming call are commands of the same instance
+		// extension, so they load by the same instance path. "enabled" above
+		// says only that an entry point resolved; a callback arriving says the
+		// extension is live on the instance and a layer is listening.
+		INIT_INSTANCE_FUNCTION_EXT(vkCreateDebugUtilsMessengerEXT)
+		INIT_INSTANCE_FUNCTION_EXT(vkDestroyDebugUtilsMessengerEXT)
+		if ( qvkCreateDebugUtilsMessengerEXT && qvkDestroyDebugUtilsMessengerEXT ) {
+			VkDebugUtilsMessengerCreateInfoEXT messengerDesc;
+			VkResult res;
+
+			messengerDesc.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+			messengerDesc.pNext = NULL;
+			messengerDesc.flags = 0;
+			messengerDesc.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
+				VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT;
+			// performance messages are noise for the question this answers
+			messengerDesc.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+				VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT;
+			messengerDesc.pfnUserCallback = vk_debug_messenger_callback;
+			messengerDesc.pUserData = NULL;
+
+			res = qvkCreateDebugUtilsMessengerEXT( vk_instance, &messengerDesc, NULL, &vk_debug_messenger );
+			ri.Printf( PRINT_ALL, "...debug messenger: %s\n",
+				res == VK_SUCCESS ? "registered" : "vkCreateDebugUtilsMessengerEXT failed" );
+			if ( res != VK_SUCCESS ) {
+				vk_debug_messenger = VK_NULL_HANDLE;
+			}
+		} else {
+			ri.Printf( PRINT_ALL, "...debug messenger: unavailable, vkCreate/DestroyDebugUtilsMessengerEXT did not load\n" );
+		}
+	} else {
+		ri.Printf( PRINT_ALL, "...object naming: unavailable, VK_EXT_debug_utils not enabled on the instance\n" );
 	}
 
 	// Check multiview support for VR single-pass stereo rendering
@@ -2586,6 +2684,9 @@ static void deinit_instance_functions( void )
 	qvkGetPhysicalDeviceSurfaceFormatsKHR = NULL;
 	qvkGetPhysicalDeviceSurfacePresentModesKHR = NULL;
 	qvkGetPhysicalDeviceSurfaceSupportKHR = NULL;
+	qvkSetDebugUtilsObjectNameEXT = NULL;
+	qvkCreateDebugUtilsMessengerEXT = NULL;
+	qvkDestroyDebugUtilsMessengerEXT = NULL;
 #ifdef USE_VK_VALIDATION
 	qvkCreateDebugReportCallbackEXT = NULL;
 	qvkDestroyDebugReportCallbackEXT = NULL;
@@ -2689,8 +2790,6 @@ static void deinit_device_functions( void )
 
 	qvkGetBufferMemoryRequirements2KHR			= NULL;
 	qvkGetImageMemoryRequirements2KHR			= NULL;
-
-	qvkDebugMarkerSetObjectNameEXT				= NULL;
 }
 
 
@@ -3147,7 +3246,7 @@ static void vk_create_geometry_buffers( VkDeviceSize size )
 		SET_OBJECT_NAME( vk.tess[i].vertex_buffer, va( "geometry buffer %i", i ), VK_DEBUG_REPORT_OBJECT_TYPE_BUFFER_EXT );
 	}
 
-	SET_OBJECT_NAME( vk.geometry_buffer_memory, "geometry buffer memory", VK_DEBUG_REPORT_OBJECT_TYPE_BUFFER_EXT );
+	SET_OBJECT_NAME( vk.geometry_buffer_memory, "geometry buffer memory", VK_DEBUG_REPORT_OBJECT_TYPE_DEVICE_MEMORY_EXT );
 
 	vk.geometry_buffer_size = vb_memory_requirements.size;
 
@@ -3194,7 +3293,7 @@ static void vk_create_storage_buffer( uint32_t size )
 	qvkBindBufferMemory( vk.device, vk.storage.buffer, vk.storage.memory, 0 );
 
 	SET_OBJECT_NAME( vk.storage.buffer, "storage buffer", VK_DEBUG_REPORT_OBJECT_TYPE_BUFFER_EXT );
-	SET_OBJECT_NAME( vk.storage.descriptor, "storage buffer", VK_DEBUG_REPORT_OBJECT_TYPE_DESCRIPTOR_SET_EXT );
+	SET_OBJECT_NAME( vk.storage.descriptor, "storage buffer descriptor", VK_DEBUG_REPORT_OBJECT_TYPE_DESCRIPTOR_SET_EXT );
 	SET_OBJECT_NAME( vk.storage.memory, "storage buffer memory", VK_DEBUG_REPORT_OBJECT_TYPE_DEVICE_MEMORY_EXT );
 }
 
@@ -4180,7 +4279,7 @@ static void vk_create_attachments( void )
 	SET_OBJECT_NAME( vk.color_image, "color attachment", VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT );
 	SET_OBJECT_NAME( vk.color_image_view, "color attachment", VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_VIEW_EXT );
 
-	SET_OBJECT_NAME( vk.capture.image, "capture image", VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_VIEW_EXT );
+	SET_OBJECT_NAME( vk.capture.image, "capture image", VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT );
 	SET_OBJECT_NAME( vk.capture.image_view, "capture image view", VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_VIEW_EXT );
 
 	for ( i = 0; i < ARRAY_LEN( vk.bloom_image ); i++ )
@@ -5000,7 +5099,12 @@ void vk_initialize( void )
 	Q_strncpyz( glConfig.vendor_string, vendor_name, sizeof( glConfig.vendor_string ) );
 	Q_strncpyz( glConfig.renderer_string, renderer_name( &props ), sizeof( glConfig.renderer_string ) );
 
-	SET_OBJECT_NAME( (intptr_t)vk.device, glConfig.renderer_string, VK_DEBUG_REPORT_OBJECT_TYPE_DEVICE_EXT );
+	// The device itself still goes unnamed. debug_marker could not carry it:
+	// the Khronos layer records the device in an instance-scope object map but
+	// looks the handle up in the device-scope one, so it could only reject the
+	// name. debug_utils has no such split and would take it, but the renderer
+	// string already reaches the console at init and nothing has asked for the
+	// name back, so the option is left declined rather than exercised.
 
 	// do early texture mode setup to avoid redundant descriptor updates in GL_SetDefaultState()
 	vk.samplers.filter_min = -1;
@@ -5703,6 +5807,20 @@ __cleanup:
 	Com_Memset( &vk_world, 0, sizeof( vk_world ) );
 	
 	if ( code != REF_KEEP_CONTEXT ) {
+		// The messenger is instance-scoped, so it is torn down here rather than
+		// with the device work above: this is the branch that drops vk_instance
+		// and clears the instance entry points, and once the destroy pointer is
+		// cleared the messenger could not be destroyed at all. Nothing is
+		// stranded on the other side of the branch: RE_Shutdown calls
+		// vk_shutdown only when code is not REF_KEEP_CONTEXT, and a
+		// REF_KEEP_CONTEXT pass leaves vk.active set so vk_initialize does not
+		// run again and re-create it: one create, one destroy, per instance.
+		if ( vk_debug_messenger != VK_NULL_HANDLE && qvkDestroyDebugUtilsMessengerEXT ) {
+			qvkDestroyDebugUtilsMessengerEXT( vk_instance, vk_debug_messenger, NULL );
+		}
+		vk_debug_messenger = VK_NULL_HANDLE;
+		vk_messenger_receiving = qfalse;
+
 		vk_destroy_instance();
 		deinit_instance_functions();
 	}
@@ -5870,7 +5988,7 @@ void vk_create_image( image_t *image, int width, int height, int mip_levels ) {
 
 	SET_OBJECT_NAME( image->handle, image->imgName, VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT );
 	SET_OBJECT_NAME( image->view, image->imgName, VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_VIEW_EXT );
-	SET_OBJECT_NAME( image->descriptor, image->imgName, VK_DEBUG_REPORT_OBJECT_TYPE_DESCRIPTOR_SET_EXT );
+	SET_OBJECT_NAME( image->descriptor, va( "%s descriptor", image->imgName ), VK_DEBUG_REPORT_OBJECT_TYPE_DESCRIPTOR_SET_EXT );
 }
 
 
