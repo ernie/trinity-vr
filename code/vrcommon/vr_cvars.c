@@ -105,11 +105,20 @@ void VR_InitCvars( void )
 	vr_frameTimingLog = Cvar_Get ("vr_frameTimingLog", "0", 0); // diagnostic: log XR frame pacing (shouldRender/predictedDisplayTime) to console
 	vr_layerSourceAlpha = Cvar_Get ("vr_layerSourceAlpha", "1", 0); // diagnostic: toggle XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT on the projection layer
 
-	// Defaults to off here where the standalone defaults to fixed: a Quest has
-	// no choice between image quality and time, a desktop part usually does,
-	// and this client's stance on defaults is r_fbo 1's -- don't change the
-	// picture the player already has.
-	vr_foveation = Cvar_Get( "vr_foveation", "0", CVAR_ARCHIVE );
+	// Defaults to eye tracked, and VR_VK_Foveation_Frame walks it down to what
+	// the device actually has -- to fixed where there is a shading rate
+	// attachment but no gaze, to off where there is no attachment. So one value
+	// covers every device and asks for the best available everywhere.
+	//
+	// Two is the right end to start from rather than fixed. Measured 2026-09-10
+	// (spec 4.6): gaze shades 29 percent of the buffer against fixed's 39 while
+	// keeping full rate under the fovea, so it is cheaper and strictly better in
+	// the worst case. Fixed cannot guarantee that at any island size short of the
+	// whole field -- the eye rotates far past a 22 degree island -- and the cost
+	// is visible in the headset, as blurring under MSAA and as blocks at one
+	// sample. Frame time is not what separates them: fixed buys 5 to 9 percent
+	// and gaze under one percent more. Quality is.
+	vr_foveation = Cvar_Get( "vr_foveation", "2", CVAR_ARCHIVE );
 	Cvar_CheckRange( vr_foveation, 0, 2, qtrue );
 
 	vr_foveationStrength = Cvar_Get( "vr_foveationStrength", "2", CVAR_ARCHIVE );

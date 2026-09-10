@@ -9567,34 +9567,6 @@ void vk_update_shading_rate( void )
 		return;
 	}
 
-	// TEMPORARY, remove before this branch ships.
-	//
-	// One image means every rebuild issues a queue-wide execution dependency
-	// from the rate-attachment read stage, so a rebuild costs frame N a wait on
-	// frame N-1's main pass. Fixed centers rebuild once and never again only if
-	// the runtime's field of view holds bit-stable frame to frame, which this
-	// counter is here to establish in a headset; that stability is why one image
-	// was chosen. Gaze rebuilds whenever the center crosses a texel, and this
-	// map's texels are fine enough that a microsaccade can do it. Silence here
-	// means fixed mode pays nothing. A rate here in Plan B is what decides
-	// whether a second image is worth its framebuffer cross product. The
-	// renderer keeps no other per-second bookkeeping to hang this on, so the
-	// window lives here.
-	{
-		static int windowStart = 0;
-		const int now = ri.Milliseconds();
-
-		if ( windowStart == 0 ) {
-			windowStart = now;
-		} else if ( now - windowStart >= 1000 ) {
-			if ( vk.xr.shadingRateRebuilds != 0 ) {
-				ri.Printf( PRINT_ALL, "Foveation: %i map rebuilds/sec\n", vk.xr.shadingRateRebuilds );
-				vk.xr.shadingRateRebuilds = 0;
-			}
-			windowStart = now;
-		}
-	}
-
 	// The slot vk_begin_frame already waited on this frame, so the host write
 	// below cannot land in a buffer an earlier frame's copy is still reading
 	slot = (uint32_t)vk.cmd_index;
@@ -9645,8 +9617,6 @@ void vk_update_shading_rate( void )
 	if ( !changed ) {
 		return;
 	}
-
-	vk.xr.shadingRateRebuilds++;
 
 	if ( level == 0 ) {
 		// A rate byte is (log2 fragment width << 2) | log2 fragment height, so a

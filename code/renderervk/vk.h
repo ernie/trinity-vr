@@ -480,8 +480,9 @@ typedef struct {
 	// different attachment count under MSAA.
 	VkFramebuffer directFramebuffers[MAX_SWAPCHAIN_IMAGES];
 
-	// Fixed foveation: the main pass's shading rate attachment. One image, not
-	// one per frame slot or swapchain index, because the barrier that precedes
+	// Foveation: the main pass's shading rate attachment, serving fixed and eye
+	// tracked alike. One image, not one per frame slot or swapchain index,
+	// because the barrier that precedes
 	// the upload orders the write against every rate read already submitted to
 	// the queue. That is also what leaves both framebuffer builders their
 	// shape: the FBO path has one shared main framebuffer, direct mode one per
@@ -526,7 +527,6 @@ typedef struct {
 	int32_t shadingRateAppliedGazeTexel[2][2];   // [eye][x,y], in map texels; unclamped, so
 	                                              // an off-screen center reads outside [0, width)
 	float shadingRateAppliedFovTan[2][4];        // the frustum the map was written against
-	int shadingRateRebuilds;        // TEMPORARY, remove before this branch ships
 
 	// HUD buffer (1280x960, single layer) for HUD mode 1 sprite
 	VkImage hudImage;

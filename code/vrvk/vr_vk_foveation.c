@@ -43,6 +43,7 @@ static XrTime s_gazeHeldTime = 0;
 // rather than as an island stuck where the player last looked.
 #define VR_GAZE_HOLD_TIMEOUT_NS 1000000000LL
 
+
 /*
 ==================
 VR_VK_Foveation_ProjectToEyes
@@ -112,16 +113,20 @@ static qboolean VR_VK_Foveation_ProjectToEyes(const XrVector3f* dirHead, float c
 ==================
 VR_VK_Foveation_SampleGaze
 
-This frame's gaze direction, in the view space. The sample time rides along on the
-location's next chain: a streaming runtime can hand back a pose measured several
-frames ago, and the gap against the predicted display time is the only way to see it.
+This frame's gaze direction, in the view space.
+
+The extension's XrEyeGazeSampleTimeEXT is deliberately not read. It was, to log how
+far a streamed pose trailed the display time, and it cannot answer that: the spec
+requires only "the clamped, predicted or interpolated time" and states the field may
+be in the future, so a sample time equal to or ahead of the display time is
+conformant and measures nothing. That is a property of the extension, not of one
+runtime, so no runtime is expected to answer it either.
 ==================
 */
-static qboolean VR_VK_Foveation_SampleGaze(VR_Engine* engine, XrTime displayTime, XrPosef* pose, XrTime* sampleTime)
+static qboolean VR_VK_Foveation_SampleGaze(VR_Engine* engine, XrTime displayTime, XrPosef* pose)
 {
 	const XrSpaceLocationFlags required =
 		XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
-	XrEyeGazeSampleTimeEXT gazeSample;
 	XrSpaceLocation loc;
 	const XrSpace gazeSpace = VR_GetEyeGazeSpace();
 
@@ -133,12 +138,21 @@ static qboolean VR_VK_Foveation_SampleGaze(VR_Engine* engine, XrTime displayTime
 		return qfalse;
 	}
 
-	memset(&gazeSample, 0, sizeof(gazeSample));
-	gazeSample.type = XR_TYPE_EYE_GAZE_SAMPLE_TIME_EXT;
+	// Whether an eye is being tracked right now, which is a different question
+	// from whether the space can be located, and is asked in a different place.
+	// A runtime that has lost the eye -- a blink, the headset off the face -- can
+	// keep handing back a location flagged valid and tracked while holding a
+	// default forward pose, with nothing in the location to say so; the pose
+	// action's own state is the other place to ask. Not every runtime answers
+	// honestly there either, and the streaming path this was written against does
+	// not, but the ones that do are the ones the hold below exists for
+	if (!VR_EyeGazeIsActive())
+	{
+		return qfalse;
+	}
 
 	memset(&loc, 0, sizeof(loc));
 	loc.type = XR_TYPE_SPACE_LOCATION;
-	loc.next = &gazeSample;
 
 	// HeadSpace, not CurrentSpace: it is XR_REFERENCE_SPACE_TYPE_VIEW (vr_base.c),
 	// so the gaze comes back already in view space and the projection below needs
@@ -150,16 +164,14 @@ static qboolean VR_VK_Foveation_SampleGaze(VR_Engine* engine, XrTime displayTime
 
 	// Orientation alone: a gaze is a direction, and the position bit can be clear
 	// on a runtime that reports the eye as a direction from the head. Tracked as
-	// well as valid, because valid alone can cover an inferred or stale pose, and
-	// taking one of those for this frame's gaze would make the age log below read
-	// fresh when it is not
+	// well as valid, since valid alone can cover an inferred or stale pose and an
+	// inferred pose is not a gaze
 	if ((loc.locationFlags & required) != required)
 	{
 		return qfalse;
 	}
 
 	*pose = loc.pose;
-	*sampleTime = gazeSample.time;
 	return qtrue;
 }
 
@@ -240,11 +252,10 @@ void VR_VK_Foveation_Frame(VR_Engine* engine, XrTime displayTime)
 	else if (mode == VR_FOVEATION_EYE_TRACKED && !vr.virtual_screen)
 	{
 		XrPosef gazePose;
-		XrTime sampleTime = 0;
 		float centers[2][2];
 		qboolean projected = qfalse;
 
-		if (VR_VK_Foveation_SampleGaze(engine, displayTime, &gazePose, &sampleTime))
+		if (VR_VK_Foveation_SampleGaze(engine, displayTime, &gazePose))
 		{
 			XrVector3f gazeDir;
 
@@ -264,28 +275,6 @@ void VR_VK_Foveation_Frame(VR_Engine* engine, XrTime displayTime)
 			memcpy(s_foveationCenter, centers, sizeof(s_foveationCenter));
 			s_gazeHeld = qtrue;
 			s_gazeHeldTime = displayTime;
-
-			// TEMPORARY, remove before this branch ships.
-			//
-			// A streaming runtime can hand back a pose measured several frames
-			// ago. At 90 Hz a frame is 11 ms, so an age in the tens of
-			// milliseconds means the island trails a saccade badly enough to be
-			// worse than fixed centers. A runtime that ignores the sample time
-			// leaves it at 0, where the subtraction would print nanoseconds
-			// since the runtime's epoch, so no line at all means the age is
-			// unknown rather than zero.
-			if (sampleTime != 0)
-			{
-				static int windowStart = 0;
-				const int now = Sys_Milliseconds();
-
-				if (windowStart == 0 || now - windowStart >= 1000)
-				{
-					Com_Printf("Foveation: gaze age %.1f ms\n",
-						(double)(displayTime - sampleTime) / 1000000.0);
-					windowStart = now;
-				}
-			}
 		}
 		else if (!s_gazeHeld || displayTime - s_gazeHeldTime > VR_GAZE_HOLD_TIMEOUT_NS)
 		{

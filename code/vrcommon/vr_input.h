@@ -12,6 +12,9 @@ void VR_DestroySessionInput( VR_Engine* engine );
 // Eye gaze pose space, XR_NULL_HANDLE whenever gaze is unavailable
 XrSpace VR_GetEyeGazeSpace( void );
 const char* VR_EyeGazeBindingState( void );
+// Whether an eye is actually being tracked this frame. The space location flags
+// are not required to say so and at least one runtime leaves them permanently set
+qboolean VR_EyeGazeIsActive( void );
 
 // Render loop
 void VR_RefreshDerivedModeState( void );

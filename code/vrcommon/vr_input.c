@@ -1043,6 +1043,26 @@ const char* VR_EyeGazeBindingState( void )
 	return eyeGazeBindingState;
 }
 
+/*
+==================
+VR_EyeGazeIsActive
+
+Whether the runtime is really tracking an eye this frame rather than handing back
+a placeholder. The gaze arrives as a pose action, and a pose action carries that
+answer in its action state, not in its space location flags -- so a runtime can
+leave the location permanently valid and tracked while still reporting here that
+it has nothing to report. Reads the state this frame's xrSyncActions produced.
+==================
+*/
+qboolean VR_EyeGazeIsActive( void )
+{
+	if (eyeGazeAction == XR_NULL_HANDLE)
+	{
+		return qfalse;
+	}
+	return ActionPoseIsActive(eyeGazeAction, XR_NULL_PATH);
+}
+
 void VR_DestroySessionInput( VR_Engine* engine )
 {
 	// This will allow to recreate session-specific OpenXR input objects
