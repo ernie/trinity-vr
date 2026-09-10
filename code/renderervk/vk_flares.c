@@ -763,9 +763,12 @@ RB_DrawDeferredHud
 Replays the captured in-world HUD sprite in the post_bloom pass, AFTER
 RB_RenderDeferredFlares has drawn the corona. Draws once per frame even
 though two post_bloom hook sites call it. Runs unconditionally of r_flares so the HUD
-still appears when flares are disabled. RF_DEPTHHACK is honoured via DEPTH_RANGE_WEAPON
-against the scene depth buffer, which the post_bloom pass LOADs, so occlusion is
-identical to the main pass; the HUD alpha-blends over the corona.
+still appears when flares are disabled. RF_DEPTHHACK is honored via DEPTH_RANGE_WEAPON
+against the scene depth the post_bloom pass LOADs. That depth is the main pass's
+resolved single sample, taken with MAX where the device supports it, so at a
+silhouette the sprite tests against the nearest of the covering samples and
+occludes conservatively - the accepted trade for a single-sample post pass.
+The HUD alpha-blends over the corona.
 ==================
 */
 void RB_DrawDeferredHud( void ) {

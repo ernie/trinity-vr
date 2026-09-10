@@ -385,6 +385,39 @@ XrResult VR_Vulkan_GetPhysicalDevice(XrInstance xrInstance, XrSystemId systemId)
     return XR_SUCCESS;
 }
 
+/*
+ * Whether the XR physical device lists a device extension. The renderer builds
+ * its main render pass through entry points two of these provide, and a missing
+ * one should name itself rather than surface as a number out of vkCreateDevice.
+ */
+static VkBool32 VR_Vulkan_DeviceExtensionSupported(const char* name)
+{
+    uint32_t count = 0;
+    VkExtensionProperties* props;
+    VkBool32 found = VK_FALSE;
+
+    if (vkEnumerateDeviceExtensionProperties(vr_vk.physicalDevice, NULL, &count, NULL) != VK_SUCCESS || count == 0) {
+        return VK_FALSE;
+    }
+
+    props = (VkExtensionProperties*)malloc(sizeof(VkExtensionProperties) * count);
+    if (props == NULL) {
+        return VK_FALSE;
+    }
+
+    if (vkEnumerateDeviceExtensionProperties(vr_vk.physicalDevice, NULL, &count, props) == VK_SUCCESS) {
+        for (uint32_t i = 0; i < count; i++) {
+            if (strcmp(props[i].extensionName, name) == 0) {
+                found = VK_TRUE;
+                break;
+            }
+        }
+    }
+
+    free(props);
+    return found;
+}
+
 XrResult VR_Vulkan_CreateDevice(XrInstance xrInstance, XrSystemId systemId)
 {
     // Our required extensions: runtime will add any additional ones via xrCreateVulkanDeviceKHR
@@ -392,8 +425,21 @@ XrResult VR_Vulkan_CreateDevice(XrInstance xrInstance, XrSystemId systemId)
         VK_KHR_MULTIVIEW_EXTENSION_NAME,  // For stereo rendering
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,  // For desktop mirror window
         VK_KHR_MAINTENANCE_4_EXTENSION_NAME,  // Relaxes push constant validation
+        VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME,    // Render pass form the depth resolve needs
+        VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME,  // Main pass resolves depth for the post pass
     };
     uint32_t extensionCount = sizeof(extensions) / sizeof(extensions[0]);
+
+    // Both are Vulkan 1.2 core and present on every part that runs a PCVR
+    // runtime, and the renderer has no path without them
+    if (!VR_Vulkan_DeviceExtensionSupported(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME)) {
+        fprintf(stderr, "[VRVK] ERROR: device does not support %s\n", VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME);
+        return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+    }
+    if (!VR_Vulkan_DeviceExtensionSupported(VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME)) {
+        fprintf(stderr, "[VRVK] ERROR: device does not support %s\n", VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME);
+        return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+    }
 
     // Find graphics queue family
     uint32_t queueFamilyCount = 0;

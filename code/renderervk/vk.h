@@ -613,6 +613,10 @@ typedef struct {
 	VkImage depth_image;
 	VkImageView depth_image_view;
 
+	// Single-sample depth the main pass resolves into, loaded by the post pass
+	VkImage depth_resolve_image;
+	VkImageView depth_resolve_image_view;
+
 	VkImage msaa_image;
 	VkImageView msaa_image_view;
 
@@ -638,7 +642,7 @@ typedef struct {
 	struct {
 		VkFramebuffer blur[VK_NUM_BLOOM_PASSES*2];
 		VkFramebuffer bloom_extract;
-		VkFramebuffer post_bloom;   // For post-bloom blend pass (color-only, no depth)
+		VkFramebuffer post_bloom;   // Post-bloom blend pass: the single-sample resolves, color and depth
 		VkFramebuffer main;         // FBO mode: single framebuffer for main rendering
 		VkFramebuffer gamma[MAX_SWAPCHAIN_IMAGES];
 		VkFramebuffer screenmap;
@@ -811,6 +815,9 @@ typedef struct {
 	qboolean multiviewSupported;   // VK_KHR_multiview available
 	qboolean depthClamp;           // depth clamp for z-fail shadow volumes
 
+	VkResolveModeFlagBits depthResolveMode;   // main pass depth resolve, MAX under reversed depth
+	VkResolveModeFlagBits stencilResolveMode; // NONE unless the device couples it to depth
+
 	float maxAnisotropy;
 	float maxLod;
 
@@ -825,6 +832,7 @@ typedef struct {
 	qboolean fboActive;
 	qboolean blitEnabled;
 	qboolean msaaActive;
+	qboolean depthResolveActive;	// main pass resolves depth for a single-sample post pass
 
 	qboolean offscreenRender;
 

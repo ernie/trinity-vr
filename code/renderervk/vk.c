@@ -52,6 +52,7 @@ static PFN_vkGetPhysicalDeviceFeatures2					qvkGetPhysicalDeviceFeatures2;
 static PFN_vkGetPhysicalDeviceFormatProperties			qvkGetPhysicalDeviceFormatProperties;
 static PFN_vkGetPhysicalDeviceMemoryProperties			qvkGetPhysicalDeviceMemoryProperties;
 static PFN_vkGetPhysicalDeviceProperties				qvkGetPhysicalDeviceProperties;
+static PFN_vkGetPhysicalDeviceProperties2				qvkGetPhysicalDeviceProperties2;
 static PFN_vkGetPhysicalDeviceQueueFamilyProperties		qvkGetPhysicalDeviceQueueFamilyProperties;
 static PFN_vkDestroySurfaceKHR							qvkDestroySurfaceKHR;
 static PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR	qvkGetPhysicalDeviceSurfaceCapabilitiesKHR;
@@ -104,6 +105,7 @@ static PFN_vkCreatePipelineLayout						qvkCreatePipelineLayout;
 static PFN_vkCreatePipelineCache						qvkCreatePipelineCache;
 static PFN_vkCreateQueryPool							qvkCreateQueryPool;
 static PFN_vkCreateRenderPass							qvkCreateRenderPass;
+static PFN_vkCreateRenderPass2KHR						qvkCreateRenderPass2KHR;
 static PFN_vkCreateSampler								qvkCreateSampler;
 static PFN_vkCreateSemaphore							qvkCreateSemaphore;
 static PFN_vkCreateShaderModule							qvkCreateShaderModule;
@@ -452,7 +454,10 @@ static void record_image_layout_transition( VkCommandBuffer command_buffer, VkIm
 	switch ( new_layout ) {
 		case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
 			dst_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-			barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+			// A pass that loads this attachment reads it at color output as well
+			// as writing it, and a write-only mask leaves that read unordered
+			barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+			                        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
 			break;
 		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
 			dst_stage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
@@ -705,29 +710,22 @@ static void vk_create_swapchain( VkPhysicalDevice physical_device, VkDevice devi
 }
 
 
-static void vk_create_render_passes( void )
+/*
+==================
+vk_fill_render_pass_dependencies
+
+The external<->subpass-0 dependency pair every render pass with a depth
+attachment needs (main, post-bloom, screenmap). Filled here once so
+vk_create_main_render_pass and vk_create_render_passes cannot drift apart
+on it; callers with a longer deps array set any further indices themselves.
+==================
+*/
+static void vk_fill_render_pass_dependencies( VkSubpassDependency deps[2] )
 {
-	VkAttachmentDescription attachments[5]; // color | depth | msaa color | emissive resolve | emissive msaa
-	VkAttachmentReference colorResolveRef = { 0 };
-	VkAttachmentReference colorResolveRefs[2];
-	VkAttachmentReference colorRef0;
-	VkAttachmentReference colorRefs[2];
-	VkAttachmentReference depthRef0;
-	VkSubpassDescription subpass;
-	VkSubpassDependency deps[3];
-	VkRenderPassCreateInfo desc;
-	VkFormat depth_format;
-	VkDevice device;
-	uint32_t i;
+	Com_Memset( deps, 0, sizeof( VkSubpassDependency ) * 2 );
 
-	depth_format = vk.depth_format;
-	device = vk.device;
-
-	// Common subpass dependencies: used by all render passes
-	Com_Memset( &deps, 0, sizeof( deps ) );
-
-	// deps[0]: External -> subpass 0 (wait for previous operations before color/depth output)
-	// Includes depth stages so an earlier frame's depth work finishes before this pass clears
+	// External -> subpass 0. Includes depth stages so an earlier frame's depth
+	// work finishes before this pass clears
 	deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
 	deps[0].dstSubpass = 0;
 	deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
@@ -742,7 +740,7 @@ static void vk_create_render_passes( void )
 	                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 	deps[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
 
-	// deps[1]: Subpass 0 -> external (wait for color/depth writes before shader reads)
+	// Subpass 0 -> external: color and depth writes complete before shader reads
 	deps[1].srcSubpass = 0;
 	deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
 	deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
@@ -752,6 +750,342 @@ static void vk_create_render_passes( void )
 	                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 	deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 	deps[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+}
+
+
+/*
+==================
+vk_create_render_pass2
+
+The renderpass2 form of a single-subpass pass. Descriptions stay in the 1.0
+structures the rest of this file writes and are converted here, so only the
+passes that need a renderpass2-only chain pay for the second form. A NULL
+depthResolveRef creates the pass the 1.0 entry point would.
+
+VkAttachmentReference2::aspectMask is read only for input attachments, of
+which this renderer declares none, so every reference leaves it zero.
+==================
+*/
+static VkRenderPass vk_create_render_pass2( const VkAttachmentDescription *attachments, uint32_t attachmentCount,
+	const VkSubpassDescription *subpass, uint32_t viewMask, uint32_t correlationMask,
+	const VkSubpassDependency *deps, uint32_t depCount, const VkAttachmentReference *depthResolveRef )
+{
+	VkAttachmentDescription2 attachments2[8];
+	VkAttachmentReference2 colorRefs2[2];
+	VkAttachmentReference2 resolveRefs2[2];
+	VkAttachmentReference2 depthRef2;
+	VkAttachmentReference2 depthResolveRef2;
+	VkSubpassDescription2 subpass2;
+	VkSubpassDependency2 deps2[4];
+	VkSubpassDescriptionDepthStencilResolve resolve;
+	VkRenderPassCreateInfo2 desc2;
+	VkRenderPass renderPass;
+	uint32_t i;
+
+	if ( attachmentCount > ARRAY_LEN( attachments2 ) || depCount > ARRAY_LEN( deps2 ) ||
+		subpass->colorAttachmentCount > ARRAY_LEN( colorRefs2 ) || subpass->inputAttachmentCount != 0 ||
+		subpass->preserveAttachmentCount != 0 ) {
+		ri.Error( ERR_FATAL, "%s: render pass does not fit the converter", __func__ );
+	}
+
+	Com_Memset( attachments2, 0, sizeof( attachments2 ) );
+	for ( i = 0; i < attachmentCount; i++ ) {
+		attachments2[i].sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
+		attachments2[i].flags = attachments[i].flags;
+		attachments2[i].format = attachments[i].format;
+		attachments2[i].samples = attachments[i].samples;
+		attachments2[i].loadOp = attachments[i].loadOp;
+		attachments2[i].storeOp = attachments[i].storeOp;
+		attachments2[i].stencilLoadOp = attachments[i].stencilLoadOp;
+		attachments2[i].stencilStoreOp = attachments[i].stencilStoreOp;
+		attachments2[i].initialLayout = attachments[i].initialLayout;
+		attachments2[i].finalLayout = attachments[i].finalLayout;
+	}
+
+	Com_Memset( colorRefs2, 0, sizeof( colorRefs2 ) );
+	Com_Memset( resolveRefs2, 0, sizeof( resolveRefs2 ) );
+	for ( i = 0; i < subpass->colorAttachmentCount; i++ ) {
+		colorRefs2[i].sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+		colorRefs2[i].attachment = subpass->pColorAttachments[i].attachment;
+		colorRefs2[i].layout = subpass->pColorAttachments[i].layout;
+		if ( subpass->pResolveAttachments != NULL ) {
+			resolveRefs2[i].sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+			resolveRefs2[i].attachment = subpass->pResolveAttachments[i].attachment;
+			resolveRefs2[i].layout = subpass->pResolveAttachments[i].layout;
+		}
+	}
+
+	Com_Memset( deps2, 0, sizeof( deps2 ) );
+	for ( i = 0; i < depCount; i++ ) {
+		deps2[i].sType = VK_STRUCTURE_TYPE_SUBPASS_DEPENDENCY_2;
+		deps2[i].srcSubpass = deps[i].srcSubpass;
+		deps2[i].dstSubpass = deps[i].dstSubpass;
+		deps2[i].srcStageMask = deps[i].srcStageMask;
+		deps2[i].dstStageMask = deps[i].dstStageMask;
+		deps2[i].srcAccessMask = deps[i].srcAccessMask;
+		deps2[i].dstAccessMask = deps[i].dstAccessMask;
+		deps2[i].dependencyFlags = deps[i].dependencyFlags;
+	}
+
+	Com_Memset( &subpass2, 0, sizeof( subpass2 ) );
+	subpass2.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2;
+	subpass2.flags = subpass->flags;
+	subpass2.pipelineBindPoint = subpass->pipelineBindPoint;
+	subpass2.viewMask = viewMask;
+	subpass2.colorAttachmentCount = subpass->colorAttachmentCount;
+	subpass2.pColorAttachments = colorRefs2;
+	subpass2.pResolveAttachments = ( subpass->pResolveAttachments != NULL ) ? resolveRefs2 : NULL;
+
+	if ( subpass->pDepthStencilAttachment != NULL ) {
+		Com_Memset( &depthRef2, 0, sizeof( depthRef2 ) );
+		depthRef2.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+		depthRef2.attachment = subpass->pDepthStencilAttachment->attachment;
+		depthRef2.layout = subpass->pDepthStencilAttachment->layout;
+		subpass2.pDepthStencilAttachment = &depthRef2;
+	}
+
+	if ( depthResolveRef != NULL ) {
+		Com_Memset( &depthResolveRef2, 0, sizeof( depthResolveRef2 ) );
+		depthResolveRef2.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+		depthResolveRef2.attachment = depthResolveRef->attachment;
+		depthResolveRef2.layout = depthResolveRef->layout;
+
+		Com_Memset( &resolve, 0, sizeof( resolve ) );
+		resolve.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_DEPTH_STENCIL_RESOLVE;
+		resolve.depthResolveMode = vk.depthResolveMode;
+		resolve.stencilResolveMode = vk.stencilResolveMode;
+		resolve.pDepthStencilResolveAttachment = &depthResolveRef2;
+
+		subpass2.pNext = &resolve;
+	}
+
+	Com_Memset( &desc2, 0, sizeof( desc2 ) );
+	desc2.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2;
+	desc2.attachmentCount = attachmentCount;
+	desc2.pAttachments = attachments2;
+	desc2.subpassCount = 1;
+	desc2.pSubpasses = &subpass2;
+	desc2.dependencyCount = depCount;
+	desc2.pDependencies = deps2;
+	// Multiview lives on the subpass here, not in a pNext chain on the pass
+	desc2.correlatedViewMaskCount = viewMask ? 1 : 0;
+	desc2.pCorrelatedViewMasks = viewMask ? &correlationMask : NULL;
+
+	VK_CHECK( qvkCreateRenderPass2KHR( vk.device, &desc2, NULL, &renderPass ) );
+
+	return renderPass;
+}
+
+
+/*
+==================
+vk_create_main_render_pass
+
+The XR main pass, built here at init and again from vk_recreate_xr_render_pass
+once the XR swapchain formats are known. One function so the two cannot drift.
+"why" names the caller in the log line and the object name, so a capture can
+tell the two builds of this pass apart.
+==================
+*/
+static void vk_create_main_render_pass( const char *why )
+{
+	VkAttachmentDescription attachments[6]; // color | depth | msaa color | emissive resolve | emissive msaa | depth resolve
+	VkAttachmentReference colorResolveRef;
+	VkAttachmentReference colorResolveRefs[2];
+	VkAttachmentReference colorRef0;
+	VkAttachmentReference colorRefs[2];
+	VkAttachmentReference depthRef0;
+	VkAttachmentReference depthResolveRef;
+	VkSubpassDescription subpass;
+	VkSubpassDependency deps[2];
+	uint32_t viewMask = 0b11;        // Both eyes (views 0 and 1)
+	uint32_t correlationMask = 0b11; // Optimization: views are correlated
+	uint32_t attachmentCount;
+
+	if ( vk.render_pass.main != VK_NULL_HANDLE ) {
+		qvkDestroyRenderPass( vk.device, vk.render_pass.main, NULL );
+		vk.render_pass.main = VK_NULL_HANDLE;
+	}
+
+	vk_fill_render_pass_dependencies( deps );
+
+	Com_Memset( attachments, 0, sizeof( attachments ) );
+
+	// Attachment 0: Color resolve target
+	attachments[0].format = vk.color_format;
+	attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+	if ( vk.msaaActive ) {
+		attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; // Written by resolve
+	} else {
+#ifdef USE_BUFFER_CLEAR
+		attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+#else
+		attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+#endif
+	}
+	attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	attachments[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+	// Attachment 1: Depth
+	attachments[1].format = vk.depth_format;
+	attachments[1].samples = vk.msaaActive ? vkSamples : VK_SAMPLE_COUNT_1_BIT;
+	attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	// Stored only where a later pass loads these samples: with no resolve to read
+	// instead, the post pass loads them directly
+	attachments[1].storeOp = vk.depthResolveActive ?
+		VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
+	attachments[1].stencilLoadOp = glConfig.stencilBits ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+	colorRef0.attachment = 0;
+	colorRef0.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+	depthRef0.attachment = 1;
+	depthRef0.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+	Com_Memset( &subpass, 0, sizeof( subpass ) );
+	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+	subpass.colorAttachmentCount = 1;
+	subpass.pColorAttachments = &colorRef0;
+	subpass.pDepthStencilAttachment = &depthRef0;
+
+	attachmentCount = 2;
+
+	if ( vk.msaaActive )
+	{
+		// Attachment 2: MSAA color (render target, resolves to [0])
+		attachments[2].format = vk.color_format;
+		attachments[2].samples = vkSamples;
+#ifdef USE_BUFFER_CLEAR
+		attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+#else
+		attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+#endif
+		// Resolved into [0], and nothing reads the samples after this pass
+		attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		attachments[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		attachments[2].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+		attachmentCount = 3;
+		colorRef0.attachment = 2;         // Render to MSAA
+		colorRef0.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		colorResolveRef.attachment = 0;   // Resolve to non-MSAA
+		colorResolveRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		subpass.pResolveAttachments = &colorResolveRef;
+
+		if ( vk.hdrActive )
+		{
+			// emissive resolve target (sampled by the gamma/mirror pass)
+			attachments[3].format = VK_FORMAT_R16G16B16A16_SFLOAT;
+			attachments[3].samples = VK_SAMPLE_COUNT_1_BIT;
+			attachments[3].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+			attachments[3].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+			attachments[3].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			attachments[3].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			attachments[3].initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			attachments[3].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+			// msaa emissive render target
+			attachments[4].format = VK_FORMAT_R16G16B16A16_SFLOAT;
+			attachments[4].samples = vkSamples;
+			attachments[4].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+			// Resolved into [3], and nothing reads the samples after this pass
+			attachments[4].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			attachments[4].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			attachments[4].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			attachments[4].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+			attachments[4].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+			colorRefs[0] = colorRef0;       // attachment 2 (msaa color)
+			colorRefs[1].attachment = 4;    // msaa emissive render target
+			colorRefs[1].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+			subpass.colorAttachmentCount = 2;
+			subpass.pColorAttachments = colorRefs;
+
+			colorResolveRefs[0] = colorResolveRef; // attachment 0 (color resolve)
+			colorResolveRefs[1].attachment = 3;    // emissive resolve
+			colorResolveRefs[1].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+			subpass.pResolveAttachments = colorResolveRefs;
+
+			attachmentCount = 5;
+		}
+	}
+
+	if ( vk.hdrActive && !vk.msaaActive )
+	{
+		// emissive resolve: rendered directly as 2nd color attachment (no MSAA)
+		attachments[2].format = VK_FORMAT_R16G16B16A16_SFLOAT;
+		attachments[2].samples = VK_SAMPLE_COUNT_1_BIT;
+		attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		// The post pass declares this layout at both ends, so leaving the pass in
+		// it is what lets that pass LOAD the attachment
+		attachments[2].initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		attachments[2].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+		colorRefs[0] = colorRef0;
+		colorRefs[1].attachment = 2;
+		colorRefs[1].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		subpass.colorAttachmentCount = 2;
+		subpass.pColorAttachments = colorRefs;
+
+		attachmentCount = 3;
+	}
+
+	if ( vk.depthResolveActive ) {
+		// One depth resolve, in the pass that renders the scene, for the
+		// single-sample post pass to depth test against
+		attachments[attachmentCount].format = vk.depth_format;
+		attachments[attachmentCount].samples = VK_SAMPLE_COUNT_1_BIT;
+		attachments[attachmentCount].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; // written by the resolve
+		attachments[attachmentCount].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		attachments[attachmentCount].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		attachments[attachmentCount].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		attachments[attachmentCount].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		attachments[attachmentCount].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+		depthResolveRef.attachment = attachmentCount;
+		depthResolveRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		attachmentCount++;
+	}
+
+	vk.render_pass.main = vk_create_render_pass2( attachments, attachmentCount, &subpass,
+		viewMask, correlationMask, deps, ARRAY_LEN( deps ),
+		vk.depthResolveActive ? &depthResolveRef : NULL );
+	SET_OBJECT_NAME( vk.render_pass.main, va( "render pass - XR main (multiview, %s)", why ), VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT );
+	ri.Printf( PRINT_ALL, "Created main render pass (%s): %p (attachments: %u, MSAA: %s)\n",
+		why, (void*)vk.render_pass.main, attachmentCount, vk.msaaActive ? "yes" : "no" );
+}
+
+
+static void vk_create_render_passes( void )
+{
+	VkAttachmentDescription attachments[5]; // color | depth | msaa color | emissive resolve | emissive msaa
+	VkAttachmentReference colorResolveRef = { 0 };
+	VkAttachmentReference colorRef0;
+	VkAttachmentReference colorRefs[2];
+	VkAttachmentReference depthRef0;
+	VkSubpassDescription subpass;
+	VkSubpassDependency deps[3];
+	VkRenderPassCreateInfo desc;
+	VkFormat depth_format;
+	VkDevice device;
+	uint32_t i;
+
+	depth_format = vk.depth_format;
+	device = vk.device;
+
+	// Common subpass dependencies: used by all render passes
+	vk_fill_render_pass_dependencies( deps );
 
 	// deps[2]: External -> subpass 0 (color output ordering, used by gamma/bloom passes)
 	deps[2].srcSubpass = VK_SUBPASS_EXTERNAL;
@@ -855,21 +1189,15 @@ static void vk_create_render_passes( void )
 	/*
 	 * XR Multiview Render Passes (VK_KHR_multiview)
 	 *
-	 * Main pass attachments:
-	 *   [0] Color resolve target (1x samples) - STORE for gamma pass
-	 *   [1] Depth (multisampled if MSAA) - STORE for the post-bloom pass, which loads it
-	 *   [2] MSAA color (only if MSAA active) - STORE for the post-bloom pass, which loads it
-	 *
 	 * Uses reversed depth (near=1.0, far=0.0) for precision.
 	 */
 	ri.Printf( PRINT_ALL, "Checking multiview support: %d\n", vk.multiviewSupported );
 	if ( vk.multiviewSupported )
 	{
-		ri.Printf( PRINT_ALL, "Creating XR multiview render passes (MSAA: %s)...\n",
-			vk.msaaActive ? "yes" : "no" );
 		VkRenderPassMultiviewCreateInfo multiviewInfo;
 		uint32_t viewMask = 0b11;        // Both eyes (views 0 and 1)
 		uint32_t correlationMask = 0b11; // Optimization: views are correlated
+		uint32_t postAttachmentCount;    // post-bloom goes through the converter, not desc
 
 		Com_Memset( &multiviewInfo, 0, sizeof( multiviewInfo ) );
 		multiviewInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO;
@@ -878,36 +1206,14 @@ static void vk_create_render_passes( void )
 		multiviewInfo.correlationMaskCount = 1;
 		multiviewInfo.pCorrelationMasks = &correlationMask;
 
-		// Attachment 0: Color resolve target
-		attachments[0].flags = 0;
-		attachments[0].format = vk.color_format;
-		attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
-		if ( vk.msaaActive ) {
-			attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; // Written by resolve
-		} else {
-#ifdef USE_BUFFER_CLEAR
-			attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-#else
-			attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-#endif
-		}
-		attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-		attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-		attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		attachments[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		vk_create_main_render_pass( "init" );
 
-		// Attachment 1: Depth
-		attachments[1].flags = 0;
-		attachments[1].format = depth_format;
-		attachments[1].samples = vk.msaaActive ? vkSamples : VK_SAMPLE_COUNT_1_BIT;
-		attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-		// Must STORE at every sample count: post_bloom LOADs depth
-		attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		attachments[1].stencilLoadOp = glConfig.stencilBits ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-		attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-		attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		// The passes below share this description; start from the main pass's shape
+		Com_Memset( attachments, 0, sizeof( attachments ) );
+		Com_Memset( &subpass, 0, sizeof( subpass ) );
+		subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		subpass.colorAttachmentCount = 1;
+		subpass.pColorAttachments = &colorRef0;
 
 		colorRef0.attachment = 0;
 		colorRef0.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -915,118 +1221,12 @@ static void vk_create_render_passes( void )
 		depthRef0.attachment = 1;
 		depthRef0.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-		Com_Memset( &subpass, 0, sizeof( subpass ) );
-		subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-		subpass.colorAttachmentCount = 1;
-		subpass.pColorAttachments = &colorRef0;
-		subpass.pDepthStencilAttachment = &depthRef0;
-
 		Com_Memset( &desc, 0, sizeof( desc ) );
 		desc.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
 		desc.pNext = &multiviewInfo;
-		desc.flags = 0;
 		desc.pAttachments = attachments;
-		desc.attachmentCount = 2;
 		desc.pSubpasses = &subpass;
 		desc.subpassCount = 1;
-		desc.dependencyCount = 2;
-		desc.pDependencies = deps;
-
-		if ( vk.msaaActive )
-		{
-			// Attachment 2: MSAA color (render target, resolves to [0])
-			attachments[2].flags = 0;
-			attachments[2].format = vk.color_format;
-			attachments[2].samples = vkSamples;
-#ifdef USE_BUFFER_CLEAR
-			attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-#else
-			attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-#endif
-			attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE; // post_bloom loads it
-			attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-			attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			attachments[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-			attachments[2].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-			desc.attachmentCount = 3;
-			colorRef0.attachment = 2;         // Render to MSAA
-			colorRef0.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-			colorResolveRef.attachment = 0;   // Resolve to non-MSAA
-			colorResolveRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-			subpass.pResolveAttachments = &colorResolveRef;
-
-			if ( vk.hdrActive )
-			{
-				// emissive resolve target (sampled by the gamma/mirror pass)
-				attachments[3].flags = 0;
-				attachments[3].format = VK_FORMAT_R16G16B16A16_SFLOAT;
-				attachments[3].samples = VK_SAMPLE_COUNT_1_BIT;
-				attachments[3].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-				attachments[3].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-				attachments[3].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-				attachments[3].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-				attachments[3].initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-				attachments[3].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-				// msaa emissive render target
-				attachments[4].flags = 0;
-				attachments[4].format = VK_FORMAT_R16G16B16A16_SFLOAT;
-				attachments[4].samples = vkSamples;
-				attachments[4].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-				attachments[4].storeOp = VK_ATTACHMENT_STORE_OP_STORE; // post_bloom loads it
-				attachments[4].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-				attachments[4].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-				attachments[4].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-				attachments[4].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-				colorRefs[0] = colorRef0;       // attachment 2 (msaa color)
-				colorRefs[1].attachment = 4;    // msaa emissive render target
-				colorRefs[1].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-				subpass.colorAttachmentCount = 2;
-				subpass.pColorAttachments = colorRefs;
-
-				colorResolveRefs[0] = colorResolveRef; // attachment 0 (color resolve)
-				colorResolveRefs[1].attachment = 3;    // emissive resolve
-				colorResolveRefs[1].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-				subpass.pResolveAttachments = colorResolveRefs;
-
-				desc.attachmentCount = 5;
-			}
-		}
-
-		if ( vk.hdrActive && !vk.msaaActive )
-		{
-			// emissive resolve: rendered directly as 2nd color attachment (no MSAA)
-			attachments[2].flags = 0;
-			attachments[2].format = VK_FORMAT_R16G16B16A16_SFLOAT;
-			attachments[2].samples = VK_SAMPLE_COUNT_1_BIT;
-			attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-			attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-			attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-			attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			// mirror the color attachment so the shared post-bloom pass can LOAD it
-			attachments[2].initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-			attachments[2].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-			colorRefs[0] = colorRef0;
-			colorRefs[1].attachment = 2;
-			colorRefs[1].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-			subpass.colorAttachmentCount = 2;
-			subpass.pColorAttachments = colorRefs;
-
-			desc.attachmentCount = 3;
-		}
-
-		VK_CHECK( qvkCreateRenderPass( device, &desc, NULL, &vk.render_pass.main ) );
-		SET_OBJECT_NAME( vk.render_pass.main, "render pass - XR main (multiview)", VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT );
-		ri.Printf( PRINT_ALL, "Created main render pass: %p (attachments: %d)\n", (void*)vk.render_pass.main, desc.attachmentCount );
-
-		// Reset for non-MSAA passes
-		subpass.pResolveAttachments = NULL;
-		colorRef0.attachment = 0;
-		subpass.colorAttachmentCount = 1;
-		subpass.pColorAttachments = &colorRef0;
 
 		// Gamma pass: outputs to XR swapchain (uses UNORM format to bypass automatic sRGB conversion)
 		// The gamma shader outputs sRGB-encoded values directly
@@ -1063,110 +1263,67 @@ static void vk_create_render_passes( void )
 			SET_OBJECT_NAME( vk.render_pass.blur[i], va( "render pass - XR blur %i (multiview)", i ), VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT );
 		}
 
-		// Post-bloom: blends bloom back into FBO color
-		if ( vk.msaaActive ) {
-			// MSAA: [0]=resolve, [1]=depth, [2]=MSAA color
-			attachments[0].format = vk.color_format;
-			attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
-			attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-			attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-			attachments[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-			attachments[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		// Post-bloom: blends bloom into the color the main pass produced and
+		// carries every draw after the scene, the 2D, the flares and the HUD
+		// sprite. One sample at every MSAA setting since the main pass resolves
+		// both color and depth: nothing drawn here benefits from multisampling,
+		// and the trade is an aliased line where a sprite or flare meets world
+		// geometry.
+		attachments[0].format = vk.color_format;
+		attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+		attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+		attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		attachments[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		attachments[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-			attachments[1].format = depth_format;
-			attachments[1].samples = vkSamples;
-			attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-			attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;  // nothing reads depth after this pass
-			attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-			attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			attachments[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-			attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		attachments[1].format = depth_format;
+		attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+		attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+		attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;  // nothing reads depth after this pass
+		attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		attachments[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-			attachments[2].format = vk.color_format;
-			attachments[2].samples = vkSamples;
-			attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-			attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;  // resolved into [0]; nothing reads the samples after
-			attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-			attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			attachments[2].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-			attachments[2].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		colorRef0.attachment = 0;
+		colorRef0.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-			desc.attachmentCount = 3;
-			desc.dependencyCount = 2;
-			desc.pDependencies = deps;
-			colorRef0.attachment = 2;
-			colorRef0.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-			colorResolveRef.attachment = 0;
-			colorResolveRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-			subpass.pDepthStencilAttachment = &depthRef0;
-			subpass.pResolveAttachments = &colorResolveRef;
-		} else {
-			// Non-MSAA: color + depth (for pipeline compatibility with RENDER_PASS_MAIN)
-			// RENDER_PASS_MAIN has 2 attachments in non-MSAA, so post_bloom must match
-			attachments[0].format = vk.color_format;
-			attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
-			attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-			attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-			attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-			attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			attachments[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-			attachments[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		Com_Memset( &subpass, 0, sizeof( subpass ) );
+		subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		subpass.colorAttachmentCount = 1;
+		subpass.pColorAttachments = &colorRef0;
+		subpass.pDepthStencilAttachment = &depthRef0;
 
-			attachments[1].format = depth_format;
-			attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
-			attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-			attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;  // nothing reads depth after this pass
-			attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-			attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			attachments[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-			attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-			desc.attachmentCount = 2;
-			desc.dependencyCount = 2;
-			desc.pDependencies = deps;
-			subpass.pDepthStencilAttachment = &depthRef0;
-		}
+		postAttachmentCount = 2;
 
 		if ( vk.hdrActive )
 		{
-			if ( vk.msaaActive )
-			{
-				// Keep the emitter energy the main pass accumulated
-				attachments[3].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;  // emissive resolve
-				attachments[3].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-				attachments[4].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;  // msaa emissive
-				attachments[4].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+			// Emissive resolve: LOAD what main wrote, STORE for gamma/mirror pass
+			attachments[2].format = VK_FORMAT_R16G16B16A16_SFLOAT;
+			attachments[2].samples = VK_SAMPLE_COUNT_1_BIT;
+			attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+			attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+			attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			attachments[2].initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			attachments[2].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-				colorRefs[0] = colorRef0;       // attachment 2 (msaa color)
-				colorRefs[1].attachment = 4;    // msaa emissive render target
-				colorRefs[1].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-				subpass.colorAttachmentCount = 2;
-				subpass.pColorAttachments = colorRefs;
+			colorRefs[0] = colorRef0;
+			colorRefs[1].attachment = 2;
+			colorRefs[1].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+			subpass.colorAttachmentCount = 2;
+			subpass.pColorAttachments = colorRefs;
 
-				colorResolveRefs[0] = colorResolveRef; // attachment 0 (color resolve)
-				colorResolveRefs[1].attachment = 3;    // emissive resolve
-				colorResolveRefs[1].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-				subpass.pResolveAttachments = colorResolveRefs;
-
-				desc.attachmentCount = 5;
-			}
-			else
-			{
-				// Emissive resolve: LOAD what main wrote, STORE for gamma/mirror pass
-				attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-				attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-
-				colorRefs[0] = colorRef0;
-				colorRefs[1].attachment = 2;
-				colorRefs[1].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-				subpass.colorAttachmentCount = 2;
-				subpass.pColorAttachments = colorRefs;
-
-				desc.attachmentCount = 3;
-			}
+			postAttachmentCount = 3;
 		}
 
-		VK_CHECK( qvkCreateRenderPass( device, &desc, NULL, &vk.render_pass.post_bloom ) );
+		// Renderpass2, as the main pass, so D4 can chain a shading rate attachment.
+		// deps[0..1] are the depth-aware external pair; deps[2] belongs to the
+		// color-only passes above and does not apply here.
+		vk.render_pass.post_bloom = vk_create_render_pass2( attachments, postAttachmentCount, &subpass,
+			viewMask, correlationMask, deps, 2, NULL );
 		SET_OBJECT_NAME( vk.render_pass.post_bloom, "render pass - XR post bloom (multiview)", VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT );
 
 		ri.Printf( PRINT_ALL, "...XR multiview render passes created\n" );
@@ -2124,6 +2281,7 @@ static void init_vulkan_library( void )
 	INIT_INSTANCE_FUNCTION( vkGetPhysicalDeviceFormatProperties )
 	INIT_INSTANCE_FUNCTION( vkGetPhysicalDeviceMemoryProperties )
 	INIT_INSTANCE_FUNCTION( vkGetPhysicalDeviceProperties )
+	INIT_INSTANCE_FUNCTION( vkGetPhysicalDeviceProperties2 )
 	INIT_INSTANCE_FUNCTION( vkGetPhysicalDeviceQueueFamilyProperties )
 	INIT_INSTANCE_FUNCTION( vkDestroySurfaceKHR )
 	INIT_INSTANCE_FUNCTION( vkGetPhysicalDeviceSurfaceCapabilitiesKHR )
@@ -2210,6 +2368,7 @@ static void init_vulkan_library( void )
 	INIT_DEVICE_FUNCTION(vkCreatePipelineLayout)
 	INIT_DEVICE_FUNCTION(vkCreateQueryPool)
 	INIT_DEVICE_FUNCTION(vkCreateRenderPass)
+	INIT_DEVICE_FUNCTION(vkCreateRenderPass2KHR)
 	INIT_DEVICE_FUNCTION(vkCreateSampler)
 	INIT_DEVICE_FUNCTION(vkCreateSemaphore)
 	INIT_DEVICE_FUNCTION(vkCreateShaderModule)
@@ -2310,6 +2469,44 @@ static void init_vulkan_library( void )
 		ri.Printf( PRINT_ALL, "...samplerAnisotropy: %s\n",
 			vk.samplerAnisotropy ? "supported" : "not supported" );
 	}
+
+	// Depth-stencil resolve modes for the main pass. MAX keeps the nearest
+	// sample under reversed depth, so the HUD sprite and the flares occlude
+	// conservatively where a pixel's samples disagree. SAMPLE_ZERO is in both
+	// supported lists by specification and is the fallback. Nothing reads the
+	// resolved stencil, so its mode is NONE unless the device couples the two.
+	{
+		VkPhysicalDeviceDepthStencilResolveProperties resolveProps;
+		VkPhysicalDeviceProperties2 props2;
+
+		Com_Memset( &resolveProps, 0, sizeof( resolveProps ) );
+		resolveProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES;
+
+		Com_Memset( &props2, 0, sizeof( props2 ) );
+		props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+		props2.pNext = &resolveProps;
+
+		qvkGetPhysicalDeviceProperties2( vk.physical_device, &props2 );
+
+		vk.depthResolveMode = ( resolveProps.supportedDepthResolveModes & VK_RESOLVE_MODE_MAX_BIT ) ?
+			VK_RESOLVE_MODE_MAX_BIT : VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+		vk.stencilResolveMode = VK_RESOLVE_MODE_NONE;
+
+		if ( vk_format_has_stencil( vk.depth_format ) && !resolveProps.independentResolveNone ) {
+			// The two modes must be identical here, so match the depth mode where
+			// the device lists it for stencil and otherwise drop both to the one
+			// mode always supported
+			if ( resolveProps.supportedStencilResolveModes & vk.depthResolveMode ) {
+				vk.stencilResolveMode = vk.depthResolveMode;
+			} else {
+				vk.depthResolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+				vk.stencilResolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+			}
+		}
+
+		ri.Printf( PRINT_ALL, "...depth resolve mode: %s\n",
+			vk.depthResolveMode == VK_RESOLVE_MODE_MAX_BIT ? "max" : "sample zero" );
+	}
 }
 
 #undef INIT_INSTANCE_FUNCTION
@@ -2332,6 +2529,7 @@ static void deinit_instance_functions( void )
 	qvkGetPhysicalDeviceFormatProperties = NULL;
 	qvkGetPhysicalDeviceMemoryProperties = NULL;
 	qvkGetPhysicalDeviceProperties = NULL;
+	qvkGetPhysicalDeviceProperties2 = NULL;
 	qvkGetPhysicalDeviceQueueFamilyProperties = NULL;
 	qvkDestroySurfaceKHR = NULL;
 	qvkGetPhysicalDeviceSurfaceCapabilitiesKHR = NULL;
@@ -2390,6 +2588,7 @@ static void deinit_device_functions( void )
 	qvkCreatePipelineLayout						= NULL;
 	qvkCreateQueryPool							= NULL;
 	qvkCreateRenderPass							= NULL;
+	qvkCreateRenderPass2KHR						= NULL;
 	qvkCreateSampler							= NULL;
 	qvkCreateSemaphore							= NULL;
 	qvkCreateShaderModule						= NULL;
@@ -3837,6 +4036,13 @@ static void vk_create_attachments( void )
 	create_depth_attachment( glConfig.vidWidth, glConfig.vidHeight, vkSamples, &vk.depth_image, &vk.depth_image_view,
 		r_bloom->integer ? qfalse : qtrue );
 
+	if ( vk.depthResolveActive ) {
+		// The main pass resolves into this and the post pass loads it, so it
+		// outlives the pass that writes it and cannot be transient
+		create_depth_attachment( glConfig.vidWidth, glConfig.vidHeight, VK_SAMPLE_COUNT_1_BIT,
+			&vk.depth_resolve_image, &vk.depth_resolve_image_view, qfalse );
+	}
+
 	vk_alloc_attachments();
 
 	for ( i = 0; i < vk.image_memory_count; i++ )
@@ -3846,6 +4052,9 @@ static void vk_create_attachments( void )
 
 	SET_OBJECT_NAME( vk.depth_image, "depth attachment", VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT );
 	SET_OBJECT_NAME( vk.depth_image_view, "depth attachment", VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_VIEW_EXT );
+
+	SET_OBJECT_NAME( vk.depth_resolve_image, "depth resolve attachment", VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT );
+	SET_OBJECT_NAME( vk.depth_resolve_image_view, "depth resolve attachment", VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_VIEW_EXT );
 
 	SET_OBJECT_NAME( vk.color_image, "color attachment", VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT );
 	SET_OBJECT_NAME( vk.color_image_view, "color attachment", VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_VIEW_EXT );
@@ -3861,6 +4070,91 @@ static void vk_create_attachments( void )
 }
 
 
+/*
+==================
+vk_create_fbo_framebuffers
+
+The main and post-bloom framebuffers, built here at init and again from
+vk_recreate_xr_render_pass with the render passes it rebuilds. One function so
+the two cannot drift.
+==================
+*/
+static void vk_create_fbo_framebuffers( void )
+{
+	VkImageView attachments[6]; // color | depth | msaa color | emissive resolve | emissive msaa | depth resolve
+	VkImageView postAttachments[3]; // color | depth | emissive resolve, all single-sample
+	VkFramebufferCreateInfo desc;
+
+	if ( vk.framebuffers.main != VK_NULL_HANDLE ) {
+		qvkDestroyFramebuffer( vk.device, vk.framebuffers.main, NULL );
+		vk.framebuffers.main = VK_NULL_HANDLE;
+	}
+	if ( vk.framebuffers.post_bloom != VK_NULL_HANDLE ) {
+		qvkDestroyFramebuffer( vk.device, vk.framebuffers.post_bloom, NULL );
+		vk.framebuffers.post_bloom = VK_NULL_HANDLE;
+	}
+
+	Com_Memset( &desc, 0, sizeof( desc ) );
+	desc.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+	desc.renderPass = vk.render_pass.main;
+	desc.width = glConfig.vidWidth;
+	desc.height = glConfig.vidHeight;
+	desc.layers = 1;  // Multiview handles stereo layers via view mask
+	desc.pAttachments = attachments;
+
+	attachments[0] = vk.color_image_view;
+	attachments[1] = vk.depth_image_view;
+	desc.attachmentCount = 2;
+
+	if ( vk.msaaActive )
+	{
+		attachments[2] = vk.msaa_image_view;
+		desc.attachmentCount = 3;
+	}
+
+	if ( vk.hdrActive )
+	{
+		// same attachment order the main/post-bloom render passes declare
+		if ( vk.msaaActive )
+		{
+			attachments[3] = vk.emissive_image_view;      // resolve
+			attachments[4] = vk.emissive_image_view_msaa; // msaa render target
+			desc.attachmentCount = 5;
+		}
+		else
+		{
+			attachments[2] = vk.emissive_image_view;      // resolve
+			desc.attachmentCount = 3;
+		}
+	}
+
+	if ( vk.depthResolveActive )
+	{
+		attachments[desc.attachmentCount++] = vk.depth_resolve_image_view;
+	}
+
+	VK_CHECK( qvkCreateFramebuffer( vk.device, &desc, NULL, &vk.framebuffers.main ) );
+	SET_OBJECT_NAME( vk.framebuffers.main, "framebuffer - main (multiview)", VK_DEBUG_REPORT_OBJECT_TYPE_FRAMEBUFFER_EXT );
+
+	// The post pass draws at one sample into what the main pass resolved, so its
+	// framebuffer is not main's
+	postAttachments[0] = vk.color_image_view;
+	postAttachments[1] = vk.depthResolveActive ? vk.depth_resolve_image_view : vk.depth_image_view;
+	desc.attachmentCount = 2;
+
+	if ( vk.hdrActive )
+	{
+		postAttachments[2] = vk.emissive_image_view;
+		desc.attachmentCount = 3;
+	}
+
+	desc.renderPass = vk.render_pass.post_bloom;
+	desc.pAttachments = postAttachments;
+	VK_CHECK( qvkCreateFramebuffer( vk.device, &desc, NULL, &vk.framebuffers.post_bloom ) );
+	SET_OBJECT_NAME( vk.framebuffers.post_bloom, "framebuffer - post_bloom (multiview)", VK_DEBUG_REPORT_OBJECT_TYPE_FRAMEBUFFER_EXT );
+}
+
+
 static void vk_create_framebuffers( void )
 {
 	VkImageView attachments[5]; // color | depth | msaa color | emissive resolve | emissive msaa
@@ -3873,61 +4167,15 @@ static void vk_create_framebuffers( void )
 	desc.pAttachments = attachments;
 	desc.layers = 1;  // Multiview handles stereo layers via view mask
 
-	for ( n = 0; n < vk.swapchain_image_count; n++ )
+	if ( r_fbo->integer )
 	{
-		desc.renderPass = vk.render_pass.main;
-		desc.attachmentCount = 2;
-		if ( r_fbo->integer == 0 )
-		{
-			// VR-only: When FBO is NOT active, main rendering goes directly to XR swapchain.
-			// XR framebuffers are created later in vk_create_xr_framebuffers() once
-			// XR swapchains are available. Don't create desktop framebuffers here.
-			continue;
-		}
-		else
-		{
-			// FBO mode: create main framebuffer (only once, shared for all swapchain indices)
-			if ( n == 0 )
-			{
-				desc.width = glConfig.vidWidth;
-				desc.height = glConfig.vidHeight;
-				attachments[0] = vk.color_image_view;
-				attachments[1] = vk.depth_image_view;
-				if ( vk.msaaActive )
-				{
-					desc.attachmentCount = 3;
-					attachments[2] = vk.msaa_image_view;
-				}
-				if ( vk.hdrActive )
-				{
-					// same attachment order the main/post-bloom render passes declare
-					if ( vk.msaaActive )
-					{
-						attachments[3] = vk.emissive_image_view;      // resolve
-						attachments[4] = vk.emissive_image_view_msaa; // msaa render target
-						desc.attachmentCount = 5;
-					}
-					else
-					{
-						attachments[2] = vk.emissive_image_view;      // resolve
-						desc.attachmentCount = 3;
-					}
-				}
-				VK_CHECK( qvkCreateFramebuffer( vk.device, &desc, NULL, &vk.framebuffers.main ) );
-				SET_OBJECT_NAME( vk.framebuffers.main, "framebuffer - main (multiview)", VK_DEBUG_REPORT_OBJECT_TYPE_FRAMEBUFFER_EXT );
-
-				// Post-bloom framebuffer - same attachments as main for pipeline compatibility
-				// Post_bloom render pass must match RENDER_PASS_MAIN attachment structure
-				desc.renderPass = vk.render_pass.post_bloom;
-				// match main's attachmentCount
-				VK_CHECK( qvkCreateFramebuffer( vk.device, &desc, NULL, &vk.framebuffers.post_bloom ) );
-				SET_OBJECT_NAME( vk.framebuffers.post_bloom, "framebuffer - post_bloom (multiview)", VK_DEBUG_REPORT_OBJECT_TYPE_FRAMEBUFFER_EXT );
-			}
-
-			// Gamma framebuffers output to XR swapchain UNORM views
-			// These are created later in vk_create_xr_gamma_framebuffers() once XR swapchains are ready
-		}
+		// One main and one post-bloom framebuffer, shared by every swapchain index.
+		// Gamma framebuffers output to XR swapchain UNORM views and are created
+		// later in vk_create_xr_gamma_framebuffers() once XR swapchains are ready.
+		vk_create_fbo_framebuffers();
 	}
+	// VR-only: when FBO is not active, main rendering goes directly to the XR
+	// swapchain and vk_create_xr_framebuffers() builds those framebuffers instead.
 
 	{
 		// screenmap - used for portal/mirror rendering
@@ -4303,6 +4551,14 @@ void vk_initialize( void )
 	} else {
 		vkSamples = VK_SAMPLE_COUNT_1_BIT;
 	}
+
+	// The post pass loads a resolved depth instead of the samples, and it is
+	// created whether or not bloom ever begins it, so the resolve target exists
+	// wherever MSAA does: a pass declaring single-sample color and multisampled
+	// depth is invalid, and its framebuffer has nothing else to bind. The test is
+	// the realized sample count, not vk.msaaActive, which is decided from the
+	// cvar before the clamp above and can survive it at one sample.
+	vk.depthResolveActive = ( vk.msaaActive && vkSamples > VK_SAMPLE_COUNT_1_BIT ) ? qtrue : qfalse;
 
 	vk.screenMapSamples = MIN( vkMaxSamples, VK_SAMPLE_COUNT_4_BIT );
 
@@ -4832,6 +5088,13 @@ static void vk_destroy_attachments( void )
 	qvkDestroyImageView( vk.device, vk.depth_image_view, NULL );
 	vk.depth_image = VK_NULL_HANDLE;
 	vk.depth_image_view = VK_NULL_HANDLE;
+
+	if ( vk.depth_resolve_image ) {
+		qvkDestroyImage( vk.device, vk.depth_resolve_image, NULL );
+		qvkDestroyImageView( vk.device, vk.depth_resolve_image_view, NULL );
+		vk.depth_resolve_image = VK_NULL_HANDLE;
+		vk.depth_resolve_image_view = VK_NULL_HANDLE;
+	}
 
 	if ( vk.screenMap.color_image ) {
 		qvkDestroyImage( vk.device, vk.screenMap.color_image, NULL );
@@ -5949,10 +6212,7 @@ void vk_create_post_process_pipelines( void )
 		create_info.layout = vk.pipeline_layout_blend;
 		create_info.renderPass = vk.render_pass.post_bloom;
 
-		// post_bloom uses MSAA when active, so bloom blend pipeline must match
-		if ( vk.msaaActive ) {
-			multisample_state.rasterizationSamples = vkSamples;
-		}
+		// post_bloom is single-sample, which is what multisample_state already says
 
 		VK_CHECK( qvkCreateGraphicsPipelines( vk.device, VK_NULL_HANDLE, 1, &create_info, NULL, &vk.bloom_blend_pipeline ) );
 		SET_OBJECT_NAME( vk.bloom_blend_pipeline, "XR bloom blend pipeline", VK_DEBUG_REPORT_OBJECT_TYPE_PIPELINE_EXT );
@@ -6803,16 +7063,13 @@ VkPipeline create_pipeline( const Vk_Pipeline_Def *def, renderPass_t renderPassI
 
 	// Set sample count based on render pass:
 	// - SCREENMAP uses its own sample count
-	// - MAIN, POST_BLOOM, and default use vkSamples (main has MSAA when active)
-	// - HUD always uses 1 sample (its render pass is non-MSAA)
+	// - HUD and POST_BLOOM are single-sample render passes
+	// - MAIN and default use vkSamples
 	if ( renderPassIndex == RENDER_PASS_SCREENMAP ) {
 		multisample_state.rasterizationSamples = vk.screenMapSamples;
-	} else if ( renderPassIndex == RENDER_PASS_HUD ) {
-		// HUD render pass is always 1 sample
+	} else if ( renderPassIndex == RENDER_PASS_HUD || renderPassIndex == RENDER_PASS_POST_BLOOM ) {
 		multisample_state.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 	} else {
-		// MAIN, POST_BLOOM, and any unexpected value use vkSamples
-		// (they all use main or post_bloom which have MSAA when active)
 		multisample_state.rasterizationSamples = vkSamples;
 	}
 
@@ -7042,7 +7299,7 @@ VkPipeline create_pipeline( const Vk_Pipeline_Def *def, renderPass_t renderPassI
 	} else if ( renderPassIndex == RENDER_PASS_HUD ) {
 		create_info.renderPass = vk.render_pass.hudBuffer;
 	} else if ( renderPassIndex == RENDER_PASS_POST_BLOOM ) {
-		// Post-bloom uses post_bloom (handles MSAA properly)
+		// Post-bloom draws at one sample into what the main pass resolved
 		create_info.renderPass = vk.render_pass.post_bloom;
 	} else {
 		// Q3VR: Use main for main render pass (XR-only, no desktop rendering)
@@ -8028,6 +8285,7 @@ void vk_begin_main_render_pass( void )
 {
 	VkRenderPassBeginInfo render_pass_begin_info;
 	VkClearValue clear_values[5];  // [0]=resolve/color, [1]=depth, [2]=MSAA color, [3]=emissive resolve, [4]=emissive msaa
+	                               // the depth resolve follows these and is never cleared, so it needs no value
 	VkRenderPass renderPass;
 	VkFramebuffer frameBuffer;
 
@@ -10920,9 +11178,10 @@ qboolean vk_bloom( void )
 			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 			VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0, 0 );
 
-		// Post-bloom blends back to FBO with LOAD_OP_LOAD (preserves base image)
-		// Post_bloom render pass must match RENDER_PASS_MAIN attachment structure
-		// for 2D pipeline compatibility (2D pipelines created for RENDER_PASS_MAIN)
+		// Post-bloom blends back to FBO with LOAD_OP_LOAD (preserves base image).
+		// It deliberately does not match RENDER_PASS_MAIN: the main pass resolves
+		// color and depth, so this one is single-sample on the resolves. Draws
+		// after this point are pipelines built for RENDER_PASS_POST_BLOOM.
 		vk.renderWidth = width;
 		vk.renderHeight = height;
 		vk.renderScaleX = vk.renderScaleY = 1.0f;
@@ -10947,12 +11206,15 @@ qboolean vk_bloom( void )
 	vk_reset_descriptor( VK_DESC_UNIFORM );
 	vk_update_descriptor( VK_DESC_UNIFORM, vk.cmd->uniform_descriptor );
 
-	// Restore pipeline state for continued 2D rendering (Quake3e pattern)
+	// Restore state for continued 2D rendering (Quake3e pattern). The pipeline is
+	// deliberately not restored: the post pass is single-sample and so is not
+	// render-pass-compatible with the main pass, and a draw here binds its own
+	// handle for this pass through vk_bind_pipeline. As the code stands this
+	// block is unreachable anyway - vk_begin_render_pass clears the tracker on
+	// every begin, and the passes above bind their pipelines raw, so the guard
+	// is always false here.
 	if ( vk.cmd->last_pipeline != VK_NULL_HANDLE )
 	{
-		// restore last pipeline
-		qvkCmdBindPipeline( vk.cmd->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.cmd->last_pipeline );
-
 		vk_update_mvp( NULL );
 
 		// force depth range and viewport/scissor updates
@@ -13218,30 +13480,24 @@ static VR_VK_SwapchainInfo s_colorSwapchainInfo;
  */
 static qboolean vk_recreate_xr_render_pass( VkFormat colorFormat, VkFormat depthFormat )
 {
-	VkAttachmentDescription attachments[5];  // [0] = resolve/color, [1] = depth, [2] = MSAA color, [3] = emissive resolve, [4] = emissive msaa (HDR)
-	VkAttachmentReference colorRef, depthRef, colorResolveRef;
-	VkAttachmentReference colorRefs[2];        // [0] = color, [1] = emissive (HDR 2nd color attachment)
-	VkAttachmentReference colorResolveRefs[2]; // [0] = color resolve, [1] = emissive resolve (HDR MSAA)
+	VkAttachmentDescription attachments[2];  // [0] = color, [1] = depth, for the gamma and virtual screen passes
+	VkAttachmentReference colorRef, depthRef;
 	VkSubpassDescription subpass;
-	VkSubpassDependency deps[2];
 	VkRenderPassCreateInfo desc;
 	VkRenderPassMultiviewCreateInfo multiviewInfo;
 	uint32_t viewMask = 0b11;
 	uint32_t correlationMask = 0b11;
-	uint32_t attachmentCount;
 
 	if ( !vk.multiviewSupported ) {
 		ri.Printf( PRINT_WARNING, "vk_recreate_xr_render_pass: multiview not supported\n" );
 		return qfalse;
 	}
 
-	// Destroy old render pass if it exists
-	if ( vk.render_pass.main != VK_NULL_HANDLE ) {
-		qvkDestroyRenderPass( vk.device, vk.render_pass.main, NULL );
-		vk.render_pass.main = VK_NULL_HANDLE;
-	}
+	// The XR swapchain color format only reaches the gamma and virtual screen
+	// passes below; the main pass renders into the FBO and is rebuilt as it was
+	vk_create_main_render_pass( "XR formats known" );
 
-	// Multiview info
+	// The gamma pass below shares this description and is multiview like the rest
 	Com_Memset( &multiviewInfo, 0, sizeof( multiviewInfo ) );
 	multiviewInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO;
 	multiviewInfo.subpassCount = 1;
@@ -13250,209 +13506,14 @@ static qboolean vk_recreate_xr_render_pass( VkFormat colorFormat, VkFormat depth
 	multiviewInfo.pCorrelationMasks = &correlationMask;
 
 	Com_Memset( attachments, 0, sizeof( attachments ) );
-
-	if ( vk.msaaActive ) {
-		// MSAA mode: 3 attachments
-		// [0] = resolve target (1x samples, where MSAA is resolved to)
-		// [1] = depth (multisampled)
-		// [2] = MSAA color (render target)
-
-		// Attachment 0: Resolve target (non-MSAA)
-		attachments[0].format = vk.color_format;
-		attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
-		attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;  // Will be resolved into
-		attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-		attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-		attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		attachments[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-		// Attachment 1: Depth (multisampled)
-		attachments[1].format = vk.depth_format;
-		attachments[1].samples = vkSamples;
-		attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-		// Must STORE: post_bloom LOADs depth
-		attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		attachments[1].stencilLoadOp = glConfig.stencilBits ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-		attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-		attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-		// Attachment 2: MSAA color (render target)
-		attachments[2].format = vk.color_format;
-		attachments[2].samples = vkSamples;
-#ifdef USE_BUFFER_CLEAR
-		attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-#else
-		attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-#endif
-		// Must STORE: post_bloom LOADs the samples
-		attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-		attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-		attachments[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		attachments[2].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-		// Subpass renders to MSAA color, resolves to attachment 0
-		colorRef.attachment = 2;  // Render to MSAA
-		colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-		colorResolveRef.attachment = 0;  // Resolve to non-MSAA
-		colorResolveRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-		depthRef.attachment = 1;
-		depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-		Com_Memset( &subpass, 0, sizeof( subpass ) );
-		subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-		subpass.colorAttachmentCount = 1;
-		subpass.pColorAttachments = &colorRef;
-		subpass.pResolveAttachments = &colorResolveRef;  // Automatic MSAA resolve
-		subpass.pDepthStencilAttachment = &depthRef;
-
-		attachmentCount = 3;
-
-		if ( vk.hdrActive ) {
-			// Mirror vk_create_render_passes' emissive-aware MSAA main pass:
-			// [3] = emissive resolve (single-sample), [4] = emissive MSAA render target.
-			attachments[3].format = VK_FORMAT_R16G16B16A16_SFLOAT;
-			attachments[3].samples = VK_SAMPLE_COUNT_1_BIT;
-			attachments[3].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-			attachments[3].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-			attachments[3].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-			attachments[3].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			attachments[3].initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-			attachments[3].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-			attachments[4].format = VK_FORMAT_R16G16B16A16_SFLOAT;
-			attachments[4].samples = vkSamples;
-			attachments[4].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-			attachments[4].storeOp = VK_ATTACHMENT_STORE_OP_STORE; // post_bloom loads it
-			attachments[4].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-			attachments[4].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			attachments[4].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-			attachments[4].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-			colorRefs[0] = colorRef;        // attachment 2 (msaa color)
-			colorRefs[1].attachment = 4;    // msaa emissive render target
-			colorRefs[1].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-			subpass.colorAttachmentCount = 2;
-			subpass.pColorAttachments = colorRefs;
-
-			colorResolveRefs[0] = colorResolveRef; // attachment 0 (color resolve)
-			colorResolveRefs[1].attachment = 3;    // emissive resolve
-			colorResolveRefs[1].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-			subpass.pResolveAttachments = colorResolveRefs;
-
-			attachmentCount = 5;
-		}
-
-		ri.Printf( PRINT_ALL, "Recreating main render pass with MSAA (%d samples)\n", vkSamples );
-	} else {
-		// Non-MSAA mode: 2 attachments
-		// [0] = color
-		// [1] = depth
-
-		// Color attachment (2-layer array)
-		attachments[0].format = vk.color_format;
-		attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
-#ifdef USE_BUFFER_CLEAR
-		attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-#else
-		attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-#endif
-		attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-		attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-		attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		attachments[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-		// Depth attachment (2-layer array)
-		attachments[1].format = vk.depth_format;
-		attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
-		attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-		// Must STORE: post_bloom LOADs depth
-		attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		attachments[1].stencilLoadOp = glConfig.stencilBits ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-		attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-		attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-		colorRef.attachment = 0;
-		colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-		depthRef.attachment = 1;
-		depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-		Com_Memset( &subpass, 0, sizeof( subpass ) );
-		subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-		subpass.colorAttachmentCount = 1;
-		subpass.pColorAttachments = &colorRef;
-		subpass.pDepthStencilAttachment = &depthRef;
-
-		attachmentCount = 2;
-
-		if ( vk.hdrActive ) {
-			// Mirror vk_create_render_passes' emissive-aware non-MSAA main pass:
-			// [2] = emissive resolve rendered directly as the 2nd color attachment.
-			attachments[2].format = VK_FORMAT_R16G16B16A16_SFLOAT;
-			attachments[2].samples = VK_SAMPLE_COUNT_1_BIT;
-			attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-			attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-			attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-			attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			attachments[2].initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-			attachments[2].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-			colorRefs[0] = colorRef;        // attachment 0 (color)
-			colorRefs[1].attachment = 2;    // emissive
-			colorRefs[1].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-			subpass.colorAttachmentCount = 2;
-			subpass.pColorAttachments = colorRefs;
-
-			attachmentCount = 3;
-		}
-	}
-
-	// Subpass dependencies: include depth stages so an earlier frame's depth
-	// work finishes before this pass clears
-	deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
-	deps[0].dstSubpass = 0;
-	deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-	                        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-	deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-	                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-	deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT |
-	                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-	deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-	                         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-	                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-	                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-	deps[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
-
-	deps[1].srcSubpass = 0;
-	deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
-	deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-	                        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-	deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-	deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-	                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-	deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-	deps[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+	Com_Memset( &subpass, 0, sizeof( subpass ) );
 
 	Com_Memset( &desc, 0, sizeof( desc ) );
 	desc.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
 	desc.pNext = &multiviewInfo;
-	desc.attachmentCount = attachmentCount;
 	desc.pAttachments = attachments;
 	desc.subpassCount = 1;
 	desc.pSubpasses = &subpass;
-	desc.dependencyCount = 2;
-	desc.pDependencies = deps;
-
-	VK_CHECK( qvkCreateRenderPass( vk.device, &desc, NULL, &vk.render_pass.main ) );
-	SET_OBJECT_NAME( vk.render_pass.main, "render pass - XR main (multiview, recreated)", VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT );
-	ri.Printf( PRINT_ALL, "Recreated main render pass: %p (attachments: %d)\n", (void*)vk.render_pass.main, attachmentCount );
 
 	// Recreate gamma render pass with UNORM format (outputs to XR swapchain via UNORM view)
 	// The gamma shader outputs sRGB-encoded values directly, so we use UNORM format
@@ -13610,63 +13671,10 @@ static qboolean vk_recreate_xr_render_pass( VkFormat colorFormat, VkFormat depth
 		ri.Printf( PRINT_ALL, "Invalidated %u pipelines for RENDER_PASS_MAIN\n", invalidated );
 	}
 
-	// Recreate FBO framebuffers with the new render passes
-	// These were created with the initial render pass in vk_create_framebuffers()
-	// but must be recreated now that render passes have changed
-	{
-		VkImageView attachments[5]; // color | depth | msaa color | emissive resolve | emissive msaa
-		VkFramebufferCreateInfo desc;
-
-		// Destroy old framebuffers
-		if ( vk.framebuffers.main != VK_NULL_HANDLE ) {
-			qvkDestroyFramebuffer( vk.device, vk.framebuffers.main, NULL );
-			vk.framebuffers.main = VK_NULL_HANDLE;
-		}
-		if ( vk.framebuffers.post_bloom != VK_NULL_HANDLE ) {
-			qvkDestroyFramebuffer( vk.device, vk.framebuffers.post_bloom, NULL );
-			vk.framebuffers.post_bloom = VK_NULL_HANDLE;
-		}
-
-		// Recreate main framebuffer with new render pass
-		Com_Memset( &desc, 0, sizeof( desc ) );
-		desc.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-		desc.renderPass = vk.render_pass.main;
-		desc.width = glConfig.vidWidth;
-		desc.height = glConfig.vidHeight;
-		desc.layers = 1;
-		attachments[0] = vk.color_image_view;
-		attachments[1] = vk.depth_image_view;
-		desc.attachmentCount = 2;
-		desc.pAttachments = attachments;
-
-		if ( vk.msaaActive ) {
-			attachments[2] = vk.msaa_image_view;
-			desc.attachmentCount = 3;
-		}
-
-		if ( vk.hdrActive ) {
-			// Same attachment order the recreated main/post_bloom render passes declare
-			if ( vk.msaaActive ) {
-				attachments[3] = vk.emissive_image_view;      // resolve
-				attachments[4] = vk.emissive_image_view_msaa; // msaa render target
-				desc.attachmentCount = 5;
-			} else {
-				attachments[2] = vk.emissive_image_view;      // resolve
-				desc.attachmentCount = 3;
-			}
-		}
-
-		VK_CHECK( qvkCreateFramebuffer( vk.device, &desc, NULL, &vk.framebuffers.main ) );
-		SET_OBJECT_NAME( vk.framebuffers.main, "framebuffer - main (recreated)", VK_DEBUG_REPORT_OBJECT_TYPE_FRAMEBUFFER_EXT );
-
-		// Recreate post-bloom framebuffer with new render pass
-		// Keep same attachmentCount as main for pipeline compatibility
-		desc.renderPass = vk.render_pass.post_bloom;
-		VK_CHECK( qvkCreateFramebuffer( vk.device, &desc, NULL, &vk.framebuffers.post_bloom ) );
-		SET_OBJECT_NAME( vk.framebuffers.post_bloom, "framebuffer - post_bloom (recreated)", VK_DEBUG_REPORT_OBJECT_TYPE_FRAMEBUFFER_EXT );
-
-		ri.Printf( PRINT_ALL, "Recreated FBO framebuffers with new render passes\n" );
-	}
+	// The framebuffers were built against the initial render passes and must
+	// follow the ones just recreated
+	vk_create_fbo_framebuffers();
+	ri.Printf( PRINT_ALL, "Recreated FBO framebuffers with new render passes\n" );
 
 	{
 		VkFormat gammaFormat = vk_get_unorm_format( colorFormat );
