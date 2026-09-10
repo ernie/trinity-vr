@@ -1839,7 +1839,7 @@ static void R_Register( void )
 	r_hdr = ri.Cvar_Get( "r_hdr", "0", CVAR_ARCHIVE_ND | CVAR_LATCH );
 	ri.Cvar_SetDescription(r_hdr, "Enables high dynamic range frame buffer texture format.\n -1: 4-bit, for testing purposes, heavy color banding, might not work on all systems\n  0: 8 bit, default, moderate color banding with multi-stage shaders\n  1: 16 bit, enhanced blending precision, no color banding, might decrease performance on AMD / Intel GPUs\nRequires " S_COLOR_CYAN "\\r_fbo 1." );
 	r_hdrDisplay = ri.Cvar_Get( "r_hdrDisplay", "0", CVAR_ARCHIVE_ND | CVAR_LATCH );
-	ri.Cvar_SetDescription( r_hdrDisplay, "True HDR output (scRGB FP16) on the desktop mirror window. Requires the Vulkan renderer, an HDR monitor, and (Windows) the OS HDR switch on. Takes effect after a \\vid_restart." );
+	ri.Cvar_SetDescription( r_hdrDisplay, "True HDR output (scRGB FP16) on the desktop mirror window. Requires the Vulkan renderer, an HDR monitor, (Windows) the OS HDR switch on, " S_COLOR_CYAN "\\r_fbo 1" S_COLOR_WHITE " (the mirror's encode needs the scene framebuffer), and " S_COLOR_CYAN "\\vr_desktopMode 1" S_COLOR_WHITE " (only the mirror's encode samples the emissive attachment). Takes effect after a \\vid_restart." );
 
 	r_hdrPeak = ri.Cvar_Get( "r_hdrPeak", "400", CVAR_ARCHIVE_ND );
 	ri.Cvar_CheckRange( r_hdrPeak, 250, 10000, qfalse );
