@@ -4560,14 +4560,11 @@ static void vk_destroy_shading_rate_image( void )
 		qvkFreeMemory( vk.device, xr->shadingRateMemory, NULL );
 		xr->shadingRateMemory = VK_NULL_HANDLE;
 	}
-	if ( xr->shadingRateTemplate != NULL ) {
-		ri.Free( xr->shadingRateTemplate );
-		xr->shadingRateTemplate = NULL;
-	}
-	xr->shadingRateTemplateLevel = -1;
 	xr->shadingRateWidth = 0;
 	xr->shadingRateHeight = 0;
 	xr->shadingRateLayers = 0;
+	xr->shadingRateFbWidth = 0;
+	xr->shadingRateFbHeight = 0;
 	xr->foveationActive = qfalse;
 }
 
@@ -4615,6 +4612,8 @@ static void vk_create_shading_rate_image( uint32_t fbWidth, uint32_t fbHeight, u
 	// texelW x texelH pixels.
 	xr->shadingRateWidth = ( fbWidth + texelW - 1 ) / texelW;
 	xr->shadingRateHeight = ( fbHeight + texelH - 1 ) / texelH;
+	xr->shadingRateFbWidth = fbWidth;
+	xr->shadingRateFbHeight = fbHeight;
 	// One layer per eye where the device allows it; a single layer otherwise,
 	// which the falloff fills from the mean of the two centers.
 	xr->shadingRateLayers = vk.shadingRateLayered ? eyeLayers : 1;
@@ -4716,17 +4715,14 @@ static void vk_create_shading_rate_image( uint32_t fbWidth, uint32_t fbHeight, u
 	SET_OBJECT_NAME( xr->shadingRateMemory, "shading rate map", VK_DEBUG_REPORT_OBJECT_TYPE_DEVICE_MEMORY_EXT );
 	SET_OBJECT_NAME( xr->shadingRateView, "shading rate map", VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_VIEW_EXT );
 
-	// Twice the map in each axis, so an eye's window can sit anywhere over it
-	xr->shadingRateTemplate = (byte*)ri.Malloc( (int)( xr->shadingRateWidth * 2 * xr->shadingRateHeight * 2 ) );
-	xr->shadingRateTemplateLevel = -1;
-
 	// A map recreated at a new size holds none of what the applied state
 	// describes, so leaving it set would skip the first upload into it
 	xr->shadingRateUploaded = qfalse;
 	xr->shadingRateAppliedLevel = 0;
 	xr->shadingRateAppliedEyeTracked = qfalse;
 	xr->shadingRateAppliedSamples = 0;
-	Com_Memset( xr->shadingRateAppliedOffset, 0, sizeof( xr->shadingRateAppliedOffset ) );
+	Com_Memset( xr->shadingRateAppliedGazeTexel, 0, sizeof( xr->shadingRateAppliedGazeTexel ) );
+	Com_Memset( xr->shadingRateAppliedFovTan, 0, sizeof( xr->shadingRateAppliedFovTan ) );
 
 	xr->foveationActive = qtrue;
 
@@ -6973,14 +6969,15 @@ void vk_create_post_process_pipelines( void )
  * vk_create_foveation_debug_pipeline - Build the r_foveationDebug tint pipeline
  *
  * Not part of vk_create_post_process_pipelines above: built lazily by
- * vk_end_frame on first enable so a player who never types the cvar pays
- * nothing for it. Styled after the gamma pipeline immediately above, with
- * four differences: it targets the main pass at the main pass's sample
- * count rather than a single-sample post pass, blends instead of replacing,
- * runs with depth test and write both off, and chains a shading rate state
- * with combiners {KEEP, REPLACE} -- the same as 3D -- so it rasterizes at
- * the map's rate instead of opting out to 1x1. A tint that opted out would
- * report 1x1 everywhere and look like a broken map rather than a broken tint.
+ * vk_draw_foveation_debug on first enable so a player who never types the
+ * cvar pays nothing for it. Styled after the gamma pipeline immediately
+ * above, with four differences: it targets the main pass at the main
+ * pass's sample count rather than a single-sample post pass, blends
+ * instead of replacing, runs with depth test and write both off, and
+ * chains a shading rate state with combiners {KEEP, REPLACE} -- the same
+ * as 3D -- so it rasterizes at the map's rate instead of opting out to
+ * 1x1. A tint that opted out would report 1x1 everywhere and look like a
+ * broken map rather than a broken tint.
  */
 static void vk_create_foveation_debug_pipeline( void )
 {
@@ -9293,32 +9290,34 @@ static void vk_begin_render_pass( VkRenderPass renderPass, VkFramebuffer frameBu
 
 /*
 ==================
-vk_foveation_level_shape
+vk_foveation_level_angles
 
-Falloff per strength, in fractions of the eye buffer's half diagonal: full density out
-to inner, down to floor by outer, floor to the corner. outer stays well under 1: the lens
-shows a rounded region, so past roughly 0.68 is a corner nobody sees. Fixed keeps a wide
-sharp region because the eyes rove while the head stays put.
+Falloff per strength, as eccentricity from the gaze: full rate out to sharp, a quarter of
+the fragments out to coarse, a sixteenth beyond. Degrees rather than fractions of the
+buffer, which would mean a different angle on every headset and a different angle at every
+gaze direction on one. Fixed keeps a wide sharp region because the eyes rove while the head
+stays put; the eye-tracked island rides the fovea and can be tighter.
+
+The middle band is the part worth spending least on. A wide sharp core and an early drop to
+a sixteenth costs less than a narrow core and a broad quarter, and puts the resolution where
+a player tracking a target is looking.
 ==================
 */
-static void vk_foveation_level_shape( int level, qboolean eyeTracked, float *inner, float *outer, float *floorDensity )
+static void vk_foveation_level_angles( int level, qboolean eyeTracked, float *sharpDeg, float *coarseDeg )
 {
 	if ( eyeTracked ) {
-		// The floor stays near a quarter: an eighth shades one fragment per 8x8 block, which crawls this close to the fovea
 		switch ( level ) {
-			case VR_FOVEATION_STRENGTH_LOW:    *inner = 0.20f; *outer = 0.66f; *floorDensity = 0.26f; break;
-			case VR_FOVEATION_STRENGTH_MEDIUM: *inner = 0.12f; *outer = 0.56f; *floorDensity = 0.19f; break;
-			default:                           *inner = 0.05f; *outer = 0.42f; *floorDensity = 0.13f; break;
+			case VR_FOVEATION_STRENGTH_LOW:    *sharpDeg = 20.0f; *coarseDeg = 40.0f; break;
+			case VR_FOVEATION_STRENGTH_MEDIUM: *sharpDeg = 16.0f; *coarseDeg = 34.0f; break;
+			default:                           *sharpDeg = 12.0f; *coarseDeg = 28.0f; break;
 		}
 		return;
 	}
 
-	// Measured on PICO at 1.3x: about 13, 19 and 26 percent off GPU frame time; fixed foveation stops paying below about a quarter
 	switch ( level ) {
-		case VR_FOVEATION_STRENGTH_LOW:    *inner = 0.30f; *outer = 0.62f; *floorDensity = 0.24f; break;
-		case VR_FOVEATION_STRENGTH_MEDIUM: *inner = 0.21f; *outer = 0.50f; *floorDensity = 0.15f; break;
-		// 0.08 shades about a sixty-fourth of the edge pixels; below that the periphery is mush for little gain
-		default:                           *inner = 0.13f; *outer = 0.40f; *floorDensity = 0.08f; break;
+		case VR_FOVEATION_STRENGTH_LOW:    *sharpDeg = 30.0f; *coarseDeg = 48.0f; break;
+		case VR_FOVEATION_STRENGTH_MEDIUM: *sharpDeg = 25.0f; *coarseDeg = 42.0f; break;
+		default:                           *sharpDeg = 22.0f; *coarseDeg = 35.0f; break;
 	}
 }
 
@@ -9378,165 +9377,107 @@ static void vk_legal_shading_rate( uint32_t reqW, uint32_t reqH, VkSampleCountFl
 
 /*
 ==================
-vk_foveation_radius
+vk_foveation_gaze_texel
 
-Where along the falloff the density first reaches a value, for the log line
-below. Returns 1.0 for a density the floor never descends to, which reads as
-past the far corner because the radius is normalized to it.
+The gaze in map texels, unclamped: vk_write_shading_rate_texels also takes the
+raw center, and a clamp here would let two off-screen centers that write different
+maps quantize to the same texel, going stale past the edge of the frustum. Signed
+so an off-screen center reads as a texel outside [0, width) rather than wrapping.
+
+The writer is a continuous function of the raw center, so even on screen this is
+a trade, not an exact test: a sub-texel move can still shift a band boundary. One
+texel of slack is the cost of comparing texels instead of raw floats every frame.
 ==================
 */
-static float vk_foveation_radius( float density, float inner, float span, float floorDensity )
+static void vk_foveation_gaze_texel( const float center[2], uint32_t width, uint32_t height,
+	int32_t *tx, int32_t *ty )
 {
-	if ( density >= 1.0f ) {
-		return inner;
-	}
-	if ( density <= floorDensity ) {
-		return 1.0f;
-	}
-	return inner + span * ( 1.0f - density ) / ( 1.0f - floorDensity );
+	// Centers arrive with y already running down the image, and map row zero is
+	// the top of the frustum, so neither axis flips
+	const float cx = ( center[0] + 1.0f ) * 0.5f;
+	const float cy = ( center[1] + 1.0f ) * 0.5f;
+
+	*tx = (int32_t)( cx * (float)width );
+	*ty = (int32_t)( cy * (float)height );
 }
 
 
 /*
 ==================
-vk_build_foveation_template
+vk_write_shading_rate_texels
 
-The falloff once, centered, at twice the map's size; each eye's map is a window of it,
-so moving the island is a copy, not a rebuild.
+A map per eye, written out rather than windowed out of one shared falloff: an eccentricity
+is not a distance in the map, so the same island cannot be slid between two eyes whose
+frusta differ, and a translated island would change angular size as it moved.
 
-One byte a texel, holding the finished rate rather than a density: the
-conversion depends on strength and sample count but never on position, so doing
-it here leaves the window copy a straight row memcpy. That is also why the
-sample count is part of the key -- the legal rate set narrows as samples rise,
-so a template built at 4x MSAA is wrong after r_ext_multisample and a vid_restart.
+A texel and the gaze are both directions, (tan x, tan y, 1), and the eccentricity is the
+angle between them. Comparing the cosine squared, with both lengths folded into the
+thresholds, keeps that to a few multiplies a texel with no trig and no root in the loop.
 ==================
 */
-static void vk_build_foveation_template( uint32_t width, uint32_t height, int level, qboolean eyeTracked,
-	VkSampleCountFlagBits samples )
+static void vk_write_shading_rate_texels( byte *dst, uint32_t width, uint32_t height, uint32_t layers,
+	int level, qboolean eyeTracked, VkSampleCountFlagBits samples,
+	const float center[2][2], const float fovTan[2][4] )
 {
-	const uint32_t tw = width * 2, th = height * 2;
-	const float aspect = ( height > 0 ) ? (float)width / (float)height : 1.0f;
-	const float invHalfDiag = 1.0f / ( 0.5f * sqrtf( aspect * aspect + 1.0f ) );
-	// The spec's per-axis conversion: an edge of 1/density, snapped to 1, 2 or 4
-	// at the geometric midpoints of those steps
-	const float edge1to2 = sqrtf( 2.0f );
-	const float edge2to4 = sqrtf( 8.0f );
+	const float invFbWidth = ( vk.xr.shadingRateFbWidth > 0 ) ? 1.0f / (float)vk.xr.shadingRateFbWidth : 0.0f;
+	const float invFbHeight = ( vk.xr.shadingRateFbHeight > 0 ) ? 1.0f / (float)vk.xr.shadingRateFbHeight : 0.0f;
+	const float texelW = (float)vk.shadingRateTexelWidth;
+	const float texelH = (float)vk.shadingRateTexelHeight;
+	float sharpDeg, coarseDeg, cosSharp, cosCoarse;
 	uint32_t midW, midH, floorW, floorH;
-	float inner, outer, floorDensity, span;
-	byte *dst;
-	uint32_t y, x;
+	byte sharpByte, midByte, floorByte;
+	uint32_t layer, y, x;
 
-	if ( vk.xr.shadingRateTemplate == NULL ) {
-		return;
-	}
-	if ( vk.xr.shadingRateTemplateLevel == level &&
-		vk.xr.shadingRateTemplateEyeTracked == eyeTracked &&
-		vk.xr.shadingRateTemplateSamples == (int)samples ) {
-		return;
-	}
+	vk_foveation_level_angles( level, eyeTracked, &sharpDeg, &coarseDeg );
+	cosSharp = cosf( (float)DEG2RAD( sharpDeg ) );
+	cosCoarse = cosf( (float)DEG2RAD( coarseDeg ) );
 
-	vk_foveation_level_shape( level, eyeTracked, &inner, &outer, &floorDensity );
-	span = outer - inner;
-	if ( span < 0.01f ) {
-		span = 0.01f;
-	}
-
+	// Both reductions depend on the sample count alone, so they are hoisted out
+	// of the texel loop rather than asked per texel
 	vk_legal_shading_rate( 2, 2, samples, &midW, &midH );
 	vk_legal_shading_rate( 4, 4, samples, &floorW, &floorH );
-
-	// Distances are in map units, not template units: a window must span what it would if the map were drawn directly
-	dst = vk.xr.shadingRateTemplate;
-	for ( y = 0; y < th; y++ ) {
-		const float ny = ( (float)y + 0.5f ) / (float)height - 1.0f;
-		for ( x = 0; x < tw; x++ ) {
-			const float nx = ( ( (float)x + 0.5f ) / (float)width - 1.0f ) * aspect;
-			// Distance from the center, normalized so the far corner is 1
-			const float r = sqrtf( nx * nx + ny * ny ) * invHalfDiag;
-			float density, edge;
-			uint32_t reqW, rateW, rateH;
-
-			if ( r <= inner ) {
-				density = 1.0f;
-			} else {
-				const float t = ( r - inner ) / span;
-				density = 1.0f + ( floorDensity - 1.0f ) * ( t > 1.0f ? 1.0f : t );
-			}
-			if ( density > 1.0f ) density = 1.0f;
-			if ( density < floorDensity ) density = floorDensity;
-
-			edge = 1.0f / density;
-			reqW = ( edge < edge1to2 ) ? 1 : ( ( edge < edge2to4 ) ? 2 : 4 );
-			// The falloff is isotropic, so both axes ask for the same edge and
-			// only the device's rate list can make the answer anisotropic
-			vk_legal_shading_rate( reqW, reqW, samples, &rateW, &rateH );
-
-			*dst++ = vk_encode_shading_rate( rateW, rateH );
-		}
-	}
-
-	vk.xr.shadingRateTemplateLevel = level;
-	vk.xr.shadingRateTemplateEyeTracked = eyeTracked;
-	vk.xr.shadingRateTemplateSamples = (int)samples;
-
-	// TEMPORARY, remove before this branch ships. The ported constants were
-	// fitted against a continuous density that a density-map driver then
-	// quantizes. A shading rate is discrete from the start, so where the
-	// boundaries actually land is the only thing that matters here, and it is
-	// not visible from the constants.
-	ri.Printf( PRINT_ALL, "Foveation template: strength %i, %s, %ix MSAA -> "
-		"1x1 to r=%.3f, %ux%u to r=%.3f, floor %ux%u\n",
-		level, eyeTracked ? "gaze" : "fixed", (int)samples,
-		vk_foveation_radius( 1.0f / edge1to2, inner, span, floorDensity ), midW, midH,
-		vk_foveation_radius( 1.0f / edge2to4, inner, span, floorDensity ), floorW, floorH );
-}
-
-
-/*
-==================
-vk_foveation_window_offset
-
-Where this eye's map starts inside the template, in map texels, which is the
-granularity the output actually has: a center move smaller than one texel
-produces the same bytes.
-==================
-*/
-static void vk_foveation_window_offset( const float center[2], uint32_t width, uint32_t height,
-	uint32_t *ox, uint32_t *oy )
-{
-	// Centers arrive with y already running down the image, so neither axis flips
-	float cx = ( center[0] + 1.0f ) * 0.5f;
-	float cy = ( center[1] + 1.0f ) * 0.5f;
-
-	if ( cx < 0.0f ) cx = 0.0f; else if ( cx > 1.0f ) cx = 1.0f;
-	if ( cy < 0.0f ) cy = 0.0f; else if ( cy > 1.0f ) cy = 1.0f;
-
-	// Sliding the window the other way moves the island toward the gaze
-	*ox = (uint32_t)( ( 1.0f - cx ) * (float)width + 0.5f );
-	*oy = (uint32_t)( ( 1.0f - cy ) * (float)height + 0.5f );
-	if ( *ox > width ) *ox = width;
-	if ( *oy > height ) *oy = height;
-}
-
-
-static void vk_write_shading_rate_texels( byte *dst, uint32_t width, uint32_t height, uint32_t layers,
-	int level, qboolean eyeTracked, VkSampleCountFlagBits samples, const float center[2][2] )
-{
-	const uint32_t tw = width * 2;
-	uint32_t layer, y;
-
-	vk_build_foveation_template( width, height, level, eyeTracked, samples );
+	sharpByte = vk_encode_shading_rate( 1, 1 );
+	midByte = vk_encode_shading_rate( midW, midH );
+	floorByte = vk_encode_shading_rate( floorW, floorH );
 
 	for ( layer = 0; layer < layers; layer++ ) {
-		// A single-layer map takes eye 0's window; vk_set_foveation has already
-		// averaged the two centers into it where the device forced one layer
+		// A single-layer map takes eye 0's frustum and center; vk_set_foveation
+		// has already averaged the two into it where the device forced one layer
 		const int eye = ( layer < 2 ) ? (int)layer : 0;
-		uint32_t ox, oy;
-
-		vk_foveation_window_offset( center[eye], width, height, &ox, &oy );
+		const float tanL = fovTan[eye][0], tanR = fovTan[eye][1];
+		const float tanU = fovTan[eye][2], tanD = fovTan[eye][3];
+		const float spanX = tanR - tanL, spanY = tanU - tanD;
+		// The gaze in the same tangent space. Fixed foveation names the optical
+		// axis, which lands on zero only when the display is not canted
+		const float gx = tanL + ( center[eye][0] + 1.0f ) * 0.5f * spanX;
+		const float gy = tanU - ( center[eye][1] + 1.0f ) * 0.5f * spanY;
+		const float gazeLen2 = gx * gx + gy * gy + 1.0f;
+		const float sharpK = cosSharp * cosSharp * gazeLen2;
+		const float coarseK = cosCoarse * cosCoarse * gazeLen2;
 
 		for ( y = 0; y < height; y++ ) {
-			Com_Memcpy( dst, vk.xr.shadingRateTemplate + (size_t)( oy + y ) * tw + ox, (size_t)width );
-			dst += (size_t)width;
+			// Texels past the buffer's edge keep going rather than clamping,
+			// so the falloff carries on instead of flattening at the edge
+			const float ty = tanU - ( ( (float)y + 0.5f ) * texelH * invFbHeight ) * spanY;
+
+			for ( x = 0; x < width; x++ ) {
+				const float tx = tanL + ( ( (float)x + 0.5f ) * texelW * invFbWidth ) * spanX;
+				const float dot = tx * gx + ty * gy + 1.0f;
+				const float cosNum = dot * dot;
+				const float texelLen2 = tx * tx + ty * ty + 1.0f;
+
+				// Squaring the dot product discards its sign, and it does go
+				// negative past ninety degrees of eccentricity on a wide frustum
+				if ( dot <= 0.0f ) {
+					*dst++ = floorByte;
+				} else if ( cosNum > sharpK * texelLen2 ) {
+					*dst++ = sharpByte;
+				} else if ( cosNum > coarseK * texelLen2 ) {
+					*dst++ = midByte;
+				} else {
+					*dst++ = floorByte;
+				}
+			}
 		}
 	}
 }
@@ -9551,26 +9492,33 @@ rendering. Nothing here touches a Vulkan object: it runs outside the frame's
 command buffer, and vk_update_shading_rate is what acts on it.
 ==================
 */
-void vk_set_foveation( int level, qboolean eyeTracked, const float centers[2][2] )
+void vk_set_foveation( int level, qboolean eyeTracked, const float centers[2][2], const float fovTan[2][4] )
 {
-	int eye;
+	int eye, i;
 
 	vk.xr.foveationLevel = ( level > 0 ) ? level : 0;
 	vk.xr.foveationEyeTracked = eyeTracked;
 
 	if ( centers == NULL ) {
 		Com_Memset( vk.xr.foveationCenter, 0, sizeof( vk.xr.foveationCenter ) );
+		Com_Memset( vk.xr.foveationFovTan, 0, sizeof( vk.xr.foveationFovTan ) );
 		return;
 	}
 	for ( eye = 0; eye < 2; eye++ ) {
 		vk.xr.foveationCenter[eye][0] = centers[eye][0];
 		vk.xr.foveationCenter[eye][1] = centers[eye][1];
+		for ( i = 0; i < 4; i++ ) {
+			vk.xr.foveationFovTan[eye][i] = fovTan[eye][i];
+		}
 	}
-	// One layer covers both eyes, so it gets the point between them rather than
-	// either eye's axis
+	// One layer covers both eyes, so it gets the point and the frustum between
+	// them rather than either eye's own
 	if ( vk.xr.shadingRateLayers < 2 ) {
 		vk.xr.foveationCenter[0][0] = 0.5f * ( centers[0][0] + centers[1][0] );
 		vk.xr.foveationCenter[0][1] = 0.5f * ( centers[0][1] + centers[1][1] );
+		for ( i = 0; i < 4; i++ ) {
+			vk.xr.foveationFovTan[0][i] = 0.5f * ( fovTan[0][i] + fovTan[1][i] );
+		}
 	}
 }
 
@@ -9613,13 +9561,15 @@ void vk_update_shading_rate( void )
 	//
 	// One image means every rebuild issues a queue-wide execution dependency
 	// from the rate-attachment read stage, so a rebuild costs frame N a wait on
-	// frame N-1's main pass. Fixed centers rebuild once and never again, which
-	// is why one image was chosen; gaze rebuilds whenever the center crosses a
-	// texel, and this map's texels are fine enough that a microsaccade can do
-	// it. Silence here means fixed mode pays nothing. A rate here in Plan B is
-	// what decides whether a second image is worth its framebuffer cross
-	// product. The renderer keeps no other per-second bookkeeping to hang this
-	// on, so the window lives here.
+	// frame N-1's main pass. Fixed centers rebuild once and never again only if
+	// the runtime's field of view holds bit-stable frame to frame, which this
+	// counter is here to establish in a headset; that stability is why one image
+	// was chosen. Gaze rebuilds whenever the center crosses a texel, and this
+	// map's texels are fine enough that a microsaccade can do it. Silence here
+	// means fixed mode pays nothing. A rate here in Plan B is what decides
+	// whether a second image is worth its framebuffer cross product. The
+	// renderer keeps no other per-second bookkeeping to hang this on, so the
+	// window lives here.
 	{
 		static int windowStart = 0;
 		const int now = ri.Milliseconds();
@@ -9644,9 +9594,8 @@ void vk_update_shading_rate( void )
 
 	level = vk.xr.foveationLevel;
 	eyeTracked = vk.xr.foveationEyeTracked;
-	// Off still needs a map, since the pass carries the attachment either way,
-	// and so does a template that could not be allocated
-	if ( level < 0 || vk.xr.shadingRateTemplate == NULL ) {
+	// Off still needs a map, since the pass carries the attachment either way
+	if ( level < 0 ) {
 		level = 0;
 	}
 
@@ -9656,22 +9605,32 @@ void vk_update_shading_rate( void )
 		vk.xr.shadingRateAppliedSamples != vkSamples );
 
 	// Level 0 writes an all-1x1 map and never reads a center, so comparing
-	// offsets there would rebuild an identical map whenever a center jittered.
+	// gaze texels there would rebuild an identical map whenever a center jittered.
 	if ( !changed && level > 0 ) {
 		const uint32_t eyes = ( vk.xr.shadingRateLayers < 2 ) ? 1 : 2;
 		uint32_t eye;
 
 		for ( eye = 0; eye < eyes; eye++ ) {
-			uint32_t ox, oy;
+			int32_t tx, ty;
 
-			vk_foveation_window_offset( vk.xr.foveationCenter[eye],
-				vk.xr.shadingRateWidth, vk.xr.shadingRateHeight, &ox, &oy );
-			if ( ox != vk.xr.shadingRateAppliedOffset[eye][0] ||
-				oy != vk.xr.shadingRateAppliedOffset[eye][1] ) {
+			vk_foveation_gaze_texel( vk.xr.foveationCenter[eye],
+				vk.xr.shadingRateWidth, vk.xr.shadingRateHeight, &tx, &ty );
+			if ( tx != vk.xr.shadingRateAppliedGazeTexel[eye][0] ||
+				ty != vk.xr.shadingRateAppliedGazeTexel[eye][1] ) {
 				changed = qtrue;
 				break;
 			}
 		}
+	}
+
+	// The band a texel falls in depends on the frustum as well as the gaze, so a
+	// runtime that varies field of view per frame must rebuild. Both runtimes here
+	// report it fixed, in which case this never fires; an exact compare is what
+	// keeps that true without a threshold to tune.
+	if ( !changed && level > 0 &&
+		memcmp( vk.xr.shadingRateAppliedFovTan, vk.xr.foveationFovTan,
+			sizeof( vk.xr.shadingRateAppliedFovTan ) ) != 0 ) {
+		changed = qtrue;
 	}
 	if ( !changed ) {
 		return;
@@ -9688,7 +9647,8 @@ void vk_update_shading_rate( void )
 		vk_write_shading_rate_texels( (byte*)vk.xr.shadingRateStagingMapped[slot],
 			vk.xr.shadingRateWidth, vk.xr.shadingRateHeight, vk.xr.shadingRateLayers,
 			level, eyeTracked, (VkSampleCountFlagBits)vkSamples,
-			(const float (*)[2])vk.xr.foveationCenter );
+			(const float (*)[2])vk.xr.foveationCenter,
+			(const float (*)[4])vk.xr.foveationFovTan );
 	}
 
 	Com_Memset( &barrier, 0, sizeof( barrier ) );
@@ -9740,11 +9700,12 @@ void vk_update_shading_rate( void )
 		uint32_t eye;
 
 		for ( eye = 0; eye < eyes; eye++ ) {
-			vk_foveation_window_offset( vk.xr.foveationCenter[eye],
+			vk_foveation_gaze_texel( vk.xr.foveationCenter[eye],
 				vk.xr.shadingRateWidth, vk.xr.shadingRateHeight,
-				&vk.xr.shadingRateAppliedOffset[eye][0], &vk.xr.shadingRateAppliedOffset[eye][1] );
+				&vk.xr.shadingRateAppliedGazeTexel[eye][0], &vk.xr.shadingRateAppliedGazeTexel[eye][1] );
 		}
 	}
+	Com_Memcpy( vk.xr.shadingRateAppliedFovTan, vk.xr.foveationFovTan, sizeof( vk.xr.shadingRateAppliedFovTan ) );
 }
 
 
@@ -10617,6 +10578,39 @@ void vk_begin_frame( uint32_t colorIndex )
 }
 
 
+/*
+ * vk_draw_foveation_debug - Draw the r_foveationDebug tint quad
+ *
+ * Must run while RENDER_PASS_MAIN is still open: the post pass carries no
+ * rate attachment, so a tint drawn there would report 1x1 everywhere and
+ * show nothing. Two sites reach here on the same frame -- vk_bloom(), which
+ * draws before it closes the main pass for the post chain, and vk_end_frame's
+ * bloom-off/direct-mode fallback -- so doneFoveationDebug keeps a frame that
+ * hits both from blending the tint twice.
+ */
+static void vk_draw_foveation_debug( void )
+{
+	if ( backEnd.doneFoveationDebug ) {
+		return;
+	}
+
+	// Built on first enable: a debug view nobody has asked for should cost the
+	// binary its shader and nothing else. The first frame after enabling it
+	// hitches, which is the right trade for a cvar.
+	if ( vk.foveation_debug_pipeline == VK_NULL_HANDLE ) {
+		vk_create_foveation_debug_pipeline();
+	}
+	if ( vk.foveation_debug_pipeline != VK_NULL_HANDLE ) {
+		qvkCmdBindPipeline( vk.cmd->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+			vk.foveation_debug_pipeline );
+		qvkCmdDraw( vk.cmd->command_buffer, 4, 1, 0, 0 );
+		vk.cmd->last_pipeline = VK_NULL_HANDLE;
+	}
+
+	backEnd.doneFoveationDebug = qtrue;
+}
+
+
 void vk_end_frame( void )
 {
 	VkSubmitInfo submit_info;
@@ -10627,9 +10621,6 @@ void vk_end_frame( void )
 	extern cvar_t *vr_desktopMode;
 	VkCommandBuffer buffers[2];
 	uint32_t bufferCount = 0;
-	// r_foveationDebug: warn once when the tint is skipped for lack of a main
-	// pass, not every frame at render rate.
-	static qboolean tintSkippedPostMainWarned = qfalse;
 
 	if ( vk.frame_count == 0 && !vk.recordingCommands )
 		return;
@@ -10645,35 +10636,12 @@ void vk_end_frame( void )
 		return;
 	}
 
-	// Last thing inside the foveated pass. The post pass is not foveated, so a
-	// tint there would report 1x1 everywhere and show nothing.
+	// Covers bloom-off and direct mode, where nothing else closes the main pass
+	// before this point; vk_bloom() draws the tint itself for the FBO path with
+	// bloom on, before it ends this same pass for the post chain.
 	if ( r_foveationDebug->integer && vk.xr.foveationActive && vk.inRenderPass &&
 		vk.renderPassIndex == RENDER_PASS_MAIN ) {
-		// Built on first enable: a debug view nobody has asked for should cost the
-		// binary its shader and nothing else. The first frame after enabling it
-		// hitches, which is the right trade for a cvar.
-		if ( vk.foveation_debug_pipeline == VK_NULL_HANDLE ) {
-			vk_create_foveation_debug_pipeline();
-		}
-		if ( vk.foveation_debug_pipeline != VK_NULL_HANDLE ) {
-			qvkCmdBindPipeline( vk.cmd->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-				vk.foveation_debug_pipeline );
-			qvkCmdDraw( vk.cmd->command_buffer, 4, 1, 0, 0 );
-			vk.cmd->last_pipeline = VK_NULL_HANDLE;
-		}
-		tintSkippedPostMainWarned = qfalse;
-	} else if ( r_foveationDebug->integer && vk.xr.foveationActive && vk.renderPassIndex != RENDER_PASS_MAIN ) {
-		// vk_bloom() already closed the main pass and moved to RENDER_PASS_POST_BLOOM
-		// by the time this runs, so the guard above declines silently; without this a
-		// user who enables the tint with bloom on sees an unchanged screen and cannot
-		// tell that from a broken rate map. Once per transition, not once per frame.
-		if ( !tintSkippedPostMainWarned ) {
-			ri.Printf( PRINT_WARNING, "Foveation: r_foveationDebug needs r_bloom 0 in the FBO path; "
-				"the post-bloom pass carries no rate attachment\n" );
-			tintSkippedPostMainWarned = qtrue;
-		}
-	} else {
-		tintSkippedPostMainWarned = qfalse;
+		vk_draw_foveation_debug();
 	}
 
 	colorIndex = vk.xr.colorIndex;
@@ -12663,6 +12631,12 @@ qboolean vk_bloom( void )
 	// this whole chain samples and writes the FBO, never the XR swapchain.
 	width = gls.captureWidth;
 	height = gls.captureHeight;
+
+	// Last chance while the main pass is still open: it closes for the post
+	// chain right below, and the post pass carries no rate attachment.
+	if ( r_foveationDebug->integer && vk.xr.foveationActive ) {
+		vk_draw_foveation_debug();
+	}
 
 	vk_end_render_pass(); // end main FBO render pass
 	vk_gpu_time_stamp( GPU_TIME_MAIN_END );

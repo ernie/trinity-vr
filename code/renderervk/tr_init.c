@@ -2252,10 +2252,10 @@ qboolean RE_InitXRResources( void ) {
 	return vk_init_xr_resources();
 }
 
-void RE_SetFoveation( int level, qboolean eyeTracked, const float centers[2][2] ) {
+void RE_SetFoveation( int level, qboolean eyeTracked, const float centers[2][2], const float fovTan[2][4] ) {
 	// Records only: this runs from the VR layer outside the frame's command
 	// buffer, and vk_update_shading_rate acts on it when the main pass opens
-	vk_set_foveation( level, eyeTracked, centers );
+	vk_set_foveation( level, eyeTracked, centers, fovTan );
 }
 
 /*

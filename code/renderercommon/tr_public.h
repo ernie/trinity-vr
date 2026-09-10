@@ -108,10 +108,11 @@ typedef struct {
 								  const float projectionEye0[16], const float projectionEye1[16],
 								  float combinedFovX, float halfIpdMeters );
 
-	// Fixed foveation: strength, whether the centers follow a gaze, and one NDC
-	// center an eye. Recorded only -- the map is rewritten when the frame that
-	// needs it opens.
-	void	(*SetFoveation)( int level, qboolean eyeTracked, const float centers[2][2] );
+	// Authored shading rate map. Centers are per-eye NDC with y running down the
+	// image; fovTan is each eye's frustum as { tanLeft, tanRight, tanUp, tanDown },
+	// which is what turns a map texel into an eccentricity. Recorded only -- the
+	// map is rewritten when the frame that needs it opens.
+	void	(*SetFoveation)( int level, qboolean eyeTracked, const float centers[2][2], const float fovTan[2][4] );
 
 	// VR framebuffer operations: called from vrcommon, implemented by each renderer
 	qboolean (*InitXRResources)( void );  // Initialize XR resources after swapchains created (Vulkan)

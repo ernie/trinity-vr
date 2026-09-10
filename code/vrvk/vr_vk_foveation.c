@@ -20,11 +20,11 @@
 
 extern vr_clientinfo_t vr;
 
-// The sharp island's center per eye, in NDC. Fixed mode sits on the optical
-// axis; eye-tracked mode holds the last gaze that located.
+// The sharp island's center per eye, in NDC. Fixed mode sits on the angular
+// bisector of the vertical field; eye-tracked mode holds the last gaze that located.
 static float s_foveationCenter[2][2] = { { 0.0f, 0.0f }, { 0.0f, 0.0f } };
 
-// Whether s_foveationCenter came from a gaze rather than from the optical axis.
+// Whether s_foveationCenter came from a gaze rather than from fixed centers.
 // It picks the renderer's tighter eye-tracked falloff, and it deliberately
 // stays set across a frame that fails to sample: the renderer rebuilds the
 // whole map whenever this flips, so clearing it on a blink would pulse the
@@ -36,7 +36,7 @@ static qboolean s_gazeHeld = qfalse;
 static XrTime s_gazeHeldTime = 0;
 
 // How long the centers are held with no valid sample before gaze is given up on
-// and the island goes back to the optical axis. A blink invalidates the pose for
+// and the island goes back to fixed centers. A blink invalidates the pose for
 // ten to fifteen frames, so a second is ninety frames at 90 Hz: far past any
 // blink or squint, and still quick enough that gaze genuinely going away -- eye
 // tracking switched off, the headset lifted off -- reads as the effect settling
@@ -45,17 +45,25 @@ static XrTime s_gazeHeldTime = 0;
 
 /*
 ==================
-VR_VK_Foveation_OpticalCenter
+VR_VK_Foveation_ProjectToEyes
 
-Straight ahead in the gaze's NDC. The FOV is asymmetric, so the optical axis sits off
-the middle of the eye buffer, by a different amount on each headset.
+A head-local direction as an NDC point per eye. Two things move the answer away from
+the middle of the buffer, and both must be applied: the frustum is asymmetric, so the
+optical axis is already off center, and a canted display carries that axis outward
+again, so head-forward does not land on it either. Rotating into the eye's frame first
+handles both, and is identity on a headset reporting no cant.
+
+Returns qfalse if any eye fell back rather than projecting, so a caller that must know
+whether it got a real answer can ask. Either way both eyes are always written, fallback
+included: two call sites and a local-plus-copy in the gaze arm all read both unconditionally.
 ==================
 */
-static void VR_VK_Foveation_OpticalCenter(float centers[2][2])
+static qboolean VR_VK_Foveation_ProjectToEyes(const XrVector3f* dirHead, float centers[2][2])
 {
 	const float tanUp = tanf(vr.fov_angle_up);
 	const float tanDown = tanf(vr.fov_angle_down);
 	const float spanY = tanUp - tanDown;
+	qboolean projected = qtrue;
 	int eye;
 
 	for (eye = 0; eye < 2; ++eye)
@@ -63,11 +71,41 @@ static void VR_VK_Foveation_OpticalCenter(float centers[2][2])
 		const float tanLeft = tanf(vr.eye_fov_angle_left[eye]);
 		const float tanRight = tanf(vr.eye_fov_angle_right[eye]);
 		const float spanX = tanRight - tanLeft;
+		// Copied, not cast: vrQuaternionf_t matches XrQuaternionf's layout, but
+		// matching layouts are not permission to alias through a pointer
+		const XrQuaternionf eyeLocal = {
+			vr.eyeLocalRotation[eye].x, vr.eyeLocalRotation[eye].y,
+			vr.eyeLocalRotation[eye].z, vr.eyeLocalRotation[eye].w };
+		XrQuaternionf eyeInv;
+		XrVector3f dir;
+		float u, v;
 
-		centers[eye][0] = (fabsf(spanX) > 1e-6f) ? -(tanLeft + tanRight) / spanX : 0.0f;
-		// y runs down the image, matching the convention the gaze uses
-		centers[eye][1] = (fabsf(spanY) > 1e-6f) ? (tanUp + tanDown) / spanY : 0.0f;
+		// eyeLocalRotation takes eye-local axes to head-local, so its inverse is
+		// what brings a head-local direction into the eye's frame. Rotating by it
+		// uninverted doubles the cant instead of removing it, and no runtime here
+		// reports a cant to catch that with.
+		XrQuaternionf_Invert(&eyeInv, &eyeLocal);
+		XrQuaternionf_RotateVector3f(&dir, &eyeInv, dirHead);
+
+		// Behind the eye, or edge-on: keep the optical axis rather than
+		// projecting through a near-zero divisor
+		if (dir.z >= -0.01f || fabsf(spanX) < 1e-6f || fabsf(spanY) < 1e-6f)
+		{
+			centers[eye][0] = (fabsf(spanX) > 1e-6f) ? -(tanLeft + tanRight) / spanX : 0.0f;
+			centers[eye][1] = (fabsf(spanY) > 1e-6f) ? (tanUp + tanDown) / spanY : 0.0f;
+			projected = qfalse;
+			continue;
+		}
+
+		u = dir.x / -dir.z;
+		v = dir.y / -dir.z;
+
+		// y runs down the image
+		centers[eye][0] = 2.0f * (u - tanLeft) / spanX - 1.0f;
+		centers[eye][1] = 1.0f - 2.0f * (v - tanDown) / spanY;
 	}
+
+	return projected;
 }
 
 /*
@@ -127,51 +165,6 @@ static qboolean VR_VK_Foveation_SampleGaze(VR_Engine* engine, XrTime displayTime
 
 /*
 ==================
-VR_VK_Foveation_GazeCenters
-
-The gaze direction as an NDC point per eye. Same convention as the optical center:
-y runs down the image, and the frustum is asymmetric, so the middle of the buffer
-is not straight ahead.
-==================
-*/
-static void VR_VK_Foveation_GazeCenters(const XrPosef* gaze, float centers[2][2])
-{
-	const float tanUp = tanf(vr.fov_angle_up);
-	const float tanDown = tanf(vr.fov_angle_down);
-	const float spanY = tanUp - tanDown;
-	XrVector3f forward = { 0.0f, 0.0f, -1.0f };
-	XrVector3f dir;
-	int eye;
-
-	// -Z rotated by the gaze orientation, which is the direction OpenXR poses face
-	XrQuaternionf_RotateVector3f(&dir, &gaze->orientation, &forward);
-
-	for (eye = 0; eye < 2; ++eye)
-	{
-		const float tanLeft = tanf(vr.eye_fov_angle_left[eye]);
-		const float tanRight = tanf(vr.eye_fov_angle_right[eye]);
-		const float spanX = tanRight - tanLeft;
-		float u, v;
-
-		// Behind the eye, or edge-on: keep the optical axis rather than
-		// projecting through a near-zero divisor
-		if (dir.z >= -0.01f || fabsf(spanX) < 1e-6f || fabsf(spanY) < 1e-6f)
-		{
-			centers[eye][0] = (fabsf(spanX) > 1e-6f) ? -(tanLeft + tanRight) / spanX : 0.0f;
-			centers[eye][1] = (fabsf(spanY) > 1e-6f) ? (tanUp + tanDown) / spanY : 0.0f;
-			continue;
-		}
-
-		u = dir.x / -dir.z;
-		v = dir.y / -dir.z;
-
-		centers[eye][0] = 2.0f * (u - tanLeft) / spanX - 1.0f;
-		centers[eye][1] = 1.0f - 2.0f * (v - tanDown) / spanY;
-	}
-}
-
-/*
-==================
 VR_VK_Foveation_Caps
 
 What this device can actually follow.
@@ -192,8 +185,21 @@ static VR_FoveationCaps VR_VK_Foveation_Caps(void)
 void VR_VK_Foveation_Frame(VR_Engine* engine, XrTime displayTime)
 {
 	const VR_FoveationCaps caps = VR_VK_Foveation_Caps();
+	// -Z is both the head's own forward and the axis an OpenXR pose faces along
+	const XrVector3f forward = { 0.0f, 0.0f, -1.0f };
+	// Fixed centers sit on the angular bisector of the vertical field, not the optical
+	// axis: a headset that gives more field one way than the other is stating where
+	// its designer expects the eye to go, so the island follows that lean. Shared by
+	// both places fixed centers get written -- the mode chosen outright, and gaze
+	// lost for long enough to give up on -- so those two can't drift into meaning
+	// different things by "fixed". On this hardware (44 up, 55 down) that is 5.5
+	// degrees below the axis.
+	const float bisectorMid = 0.5f * (vr.fov_angle_up + vr.fov_angle_down);
+	const XrVector3f bisector = { 0.0f, sinf(bisectorMid), -cosf(bisectorMid) };
 	int mode;
 	int strength;
+	int eye;
+	float fovTan[2][4];
 
 	if (!vr_foveation || !vr_foveationStrength || !re.SetFoveation)
 	{
@@ -219,8 +225,8 @@ void VR_VK_Foveation_Frame(VR_Engine* engine, XrTime displayTime)
 	vr_foveationStrength->modified = qfalse;
 
 	// The virtual screen fills the eye buffer with a panel the player reads, and
-	// the map is centered on the optical axis rather than on that panel, so
-	// foveating it only softens text where nobody is looking past anything
+	// the map's center never lines up with that panel, so foveating it only
+	// softens text where nobody is looking past anything
 	strength = (mode == VR_FOVEATION_OFF || vr.virtual_screen) ? 0 : vr_foveationStrength->integer;
 
 	if (vr.weapon_zoomed)
@@ -235,10 +241,27 @@ void VR_VK_Foveation_Frame(VR_Engine* engine, XrTime displayTime)
 	{
 		XrPosef gazePose;
 		XrTime sampleTime = 0;
+		float centers[2][2];
+		qboolean projected = qfalse;
 
 		if (VR_VK_Foveation_SampleGaze(engine, displayTime, &gazePose, &sampleTime))
 		{
-			VR_VK_Foveation_GazeCenters(&gazePose, s_foveationCenter);
+			XrVector3f gazeDir;
+
+			// -Z rotated by the gaze orientation, which is the direction OpenXR poses face
+			XrQuaternionf_RotateVector3f(&gazeDir, &gazePose.orientation, &forward);
+
+			// An eye that fell back holds the optical axis, not a gaze -- no longer
+			// what fixed mode uses either, now that it sits on the bisector. Committing
+			// it would put the tighter eye-tracked falloff on a center with no gaze
+			// behind it, so let it fail the sample and leave the held centers alone
+			// for the ladder below to judge.
+			projected = VR_VK_Foveation_ProjectToEyes(&gazeDir, centers);
+		}
+
+		if (projected)
+		{
+			memcpy(s_foveationCenter, centers, sizeof(s_foveationCenter));
 			s_gazeHeld = qtrue;
 			s_gazeHeldTime = displayTime;
 
@@ -268,21 +291,33 @@ void VR_VK_Foveation_Frame(VR_Engine* engine, XrTime displayTime)
 		{
 			// Nothing good to hold yet, or nothing good for long enough that this
 			// has stopped being a blink and become gaze going away: either way the
-			// island belongs back on the optical axis with the fixed falloff,
-			// rather than frozen where the player last looked
-			VR_VK_Foveation_OpticalCenter(s_foveationCenter);
+			// island belongs back on fixed centers, with the fixed falloff, rather
+			// than frozen where the player last looked
+			VR_VK_Foveation_ProjectToEyes(&bisector, s_foveationCenter);
 			s_gazeHeld = qfalse;
 		}
 		// else: write nothing, holding the last good gaze centers. A blink
 		// invalidates the pose for a few frames, and snapping the island back to
-		// the optical axis and out again each time is far more visible than
-		// leaving it where the player was last looking.
+		// fixed centers and out again each time is far more visible than leaving
+		// it where the player was last looking.
 	}
 	else
 	{
-		VR_VK_Foveation_OpticalCenter(s_foveationCenter);
+		VR_VK_Foveation_ProjectToEyes(&bisector, s_foveationCenter);
 		s_gazeHeld = qfalse;
 	}
 
-	re.SetFoveation(strength, s_gazeHeld, (const float (*)[2])s_foveationCenter);
+	// vr.fov_angle_up/down are already averaged across both eyes by
+	// IN_VRUpdateHMD (vr_input.c), so the vertical pair below is shared rather
+	// than read per eye. Exact on both runtimes here, since vertical field of
+	// view does not differ between eyes the way the horizontal asymmetry does.
+	for (eye = 0; eye < 2; ++eye)
+	{
+		fovTan[eye][0] = tanf(vr.eye_fov_angle_left[eye]);
+		fovTan[eye][1] = tanf(vr.eye_fov_angle_right[eye]);
+		fovTan[eye][2] = tanf(vr.fov_angle_up);
+		fovTan[eye][3] = tanf(vr.fov_angle_down);
+	}
+
+	re.SetFoveation(strength, s_gazeHeld, (const float (*)[2])s_foveationCenter, (const float (*)[4])fovTan);
 }

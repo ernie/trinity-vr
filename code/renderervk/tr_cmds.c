@@ -308,6 +308,7 @@ void RE_BeginFrame( stereoFrame_t stereoFrame ) {
 	backEnd.doneBloom = qfalse;
 	backEnd.doneFlares = qfalse;
 	backEnd.hudDeferred = qfalse;
+	backEnd.doneFoveationDebug = qfalse;
 #endif
 
 	backEnd.color2D.u32 = ~0U;

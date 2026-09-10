@@ -1202,6 +1202,7 @@ typedef struct {
 	qboolean doneBloom;
 	qboolean doneFlares;	// main-view coronas drawn (deferred, once per frame)
 	qboolean hudDeferred;	// in-world VR HUD sprite captured, awaiting post_bloom replay over the corona
+	qboolean doneFoveationDebug;	// r_foveationDebug tint drawn (vk_bloom and vk_end_frame both call in)
 
 	// VR render target tracking
 	qboolean isDrawingHUD;
@@ -2149,7 +2150,7 @@ void RE_SetVRHeadsetParms( const float projectionMatrix[16],
 						   const float projectionEye1[16],
 						   float combinedFovX,
 						   float halfIpdMeters );
-void RE_SetFoveation( int level, qboolean eyeTracked, const float centers[2][2] );
+void RE_SetFoveation( int level, qboolean eyeTracked, const float centers[2][2], const float fovTan[2][4] );
 void RE_ClearVRFramebuffer( int width, int height, qboolean isThirdPersonSpectator );
 void RE_SwapDesktopWindow( void );
 void RE_WaitForRenderComplete( void );

@@ -320,7 +320,7 @@ void vk_begin_main_render_pass( void );
 void vk_update_shading_rate( void );  // records the rate map upload; one image, so no index
 // Records what the map should hold. Called from outside the frame's command
 // buffer, so it touches no Vulkan object.
-void vk_set_foveation( int level, qboolean eyeTracked, const float centers[2][2] );
+void vk_set_foveation( int level, qboolean eyeTracked, const float centers[2][2], const float fovTan[2][4] );
 void vk_begin_hud_render_pass( qboolean clear );
 void vk_end_hud_render_pass( void );
 qboolean vk_create_hud_buffer( void );
@@ -501,6 +501,8 @@ typedef struct {
 	uint32_t shadingRateWidth;      // in rate texels, not pixels
 	uint32_t shadingRateHeight;
 	uint32_t shadingRateLayers;     // one per eye where the device allows it, else 1
+	uint32_t shadingRateFbWidth;    // the pixel size the map was sized from
+	uint32_t shadingRateFbHeight;
 	qboolean foveationActive;       // every consumer is guarded on this
 
 	// What the VR layer asked for, recorded by vk_set_foveation outside the
@@ -509,14 +511,10 @@ typedef struct {
 	qboolean foveationEyeTracked;
 	float foveationCenter[2][2];    // per eye, in NDC, y running down the image
 
-	// The falloff drawn once at twice the map's size, so moving an eye's window
-	// over it is a row copy rather than a rebuild. One byte a texel, the
-	// finished rate: the density-to-rate conversion depends on strength and
-	// sample count but never on position, so it belongs in the template.
-	byte *shadingRateTemplate;
-	int shadingRateTemplateLevel;   // -1 until built
-	qboolean shadingRateTemplateEyeTracked;
-	int shadingRateTemplateSamples; // the legal rate set changes with samples
+	// Each eye's frustum as { tanLeft, tanRight, tanUp, tanDown }. A map texel is
+	// a direction in this space, which is what makes the falloff an angle rather
+	// than a distance across the buffer.
+	float foveationFovTan[2][4];
 
 	// What the image already holds. One image, so one copy of this, not one a
 	// frame slot; vk_begin_main_render_pass runs twice in a frame that draws a
@@ -525,7 +523,9 @@ typedef struct {
 	int shadingRateAppliedLevel;
 	qboolean shadingRateAppliedEyeTracked;
 	int shadingRateAppliedSamples;
-	uint32_t shadingRateAppliedOffset[2][2];  // [eye][x,y], in map texels
+	int32_t shadingRateAppliedGazeTexel[2][2];   // [eye][x,y], in map texels; unclamped, so
+	                                              // an off-screen center reads outside [0, width)
+	float shadingRateAppliedFovTan[2][4];        // the frustum the map was written against
 	int shadingRateRebuilds;        // TEMPORARY, remove before this branch ships
 
 	// HUD buffer (1280x960, single layer) for HUD mode 1 sprite
