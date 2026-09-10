@@ -54,7 +54,7 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E env "PATH=${CMAKE_BINARY_DIR}" bin2hex ${SPIRV_DIR}/temp.spv +${SHADER_DATA_OUTPUT} gamma_vert_spv
     COMMAND ${GLSLANG_VALIDATOR} -S frag -V --target-env vulkan1.1 -o ${SPIRV_DIR}/temp.spv ${SHADER_DIR}/gamma.frag
     COMMAND ${CMAKE_COMMAND} -E env "PATH=${CMAKE_BINARY_DIR}" bin2hex ${SPIRV_DIR}/temp.spv +${SHADER_DATA_OUTPUT} gamma_frag_spv
-    COMMAND ${GLSLANG_VALIDATOR} -S frag -V --target-env vulkan1.2 -o ${SPIRV_DIR}/temp.spv ${SHADER_DIR}/foveationdebug.frag
+    COMMAND ${GLSLANG_VALIDATOR} -S frag -V --target-env vulkan1.1 -o ${SPIRV_DIR}/temp.spv ${SHADER_DIR}/foveationdebug.frag
     COMMAND ${CMAKE_COMMAND} -E env "PATH=${CMAKE_BINARY_DIR}" bin2hex ${SPIRV_DIR}/temp.spv +${SHADER_DATA_OUTPUT} foveationdebug_frag_spv
     COMMAND ${GLSLANG_VALIDATOR} -S frag -V --target-env vulkan1.1 -o ${SPIRV_DIR}/temp.spv ${SHADER_DIR}/blend.frag
     COMMAND ${CMAKE_COMMAND} -E env "PATH=${CMAKE_BINARY_DIR}" bin2hex ${SPIRV_DIR}/temp.spv +${SHADER_DATA_OUTPUT} blend_frag_spv
