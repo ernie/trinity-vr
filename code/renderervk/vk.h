@@ -480,22 +480,17 @@ typedef struct {
 	// different attachment count under MSAA.
 	VkFramebuffer directFramebuffers[MAX_SWAPCHAIN_IMAGES];
 
-	// Foveation: the main pass's shading rate attachment, serving fixed and eye
-	// tracked alike. One image, not one per frame slot or swapchain index,
-	// because the barrier that precedes
-	// the upload orders the write against every rate read already submitted to
-	// the queue. That is also what leaves both framebuffer builders their
-	// shape: the FBO path has one shared main framebuffer, direct mode one per
-	// swapchain image, and a per-slot map would force an array on one and a
-	// cross product on the other.
+	// The main pass's shading rate attachment, serving fixed and eye tracked alike.
+	// One image rather than one per slot: the upload's barrier already orders the
+	// write against every rate read submitted to the queue, and per-slot would
+	// force an array on the FBO path's shared framebuffer and a cross product on
+	// direct mode's per-swapchain-image ones.
 	VkImage shadingRateImage;
 	VkDeviceMemory shadingRateMemory;
 	VkImageView shadingRateView;
-	// The staging buffer, unlike the image, is per frame slot. A pipeline
-	// barrier orders the GPU against the GPU; nothing it can express orders a
-	// CPU write into host-mapped memory against a copy the GPU has not reached
-	// yet, and vk_begin_frame waits only on the slot it is about to reuse.
-	// Indexing by vk.cmd_index is what makes that fence wait cover this buffer.
+	// Per frame slot, unlike the image: no barrier orders a CPU write into mapped
+	// memory against a copy the GPU has not reached, and vk_begin_frame waits only
+	// on the slot it reuses. Indexing by cmd_index is what puts this under it.
 	VkBuffer shadingRateStaging[NUM_COMMAND_BUFFERS];
 	VkDeviceMemory shadingRateStagingMemory[NUM_COMMAND_BUFFERS];
 	void *shadingRateStagingMapped[NUM_COMMAND_BUFFERS];
@@ -689,11 +684,10 @@ typedef struct {
 	VkImage msaa_image;
 	VkImageView msaa_image_view;
 
-	// Direct mode with MSAA: the scene draws into these and the store resolves
-	// color into the swapchain image, so nothing reads either afterwards. They
-	// own their memory instead of taking a slice of the batched attachment pool,
-	// because the color's format is the XR swapchain's and is not known until
-	// long after the pool is packed.
+	// Direct mode with MSAA: the scene draws here and the store resolves into the
+	// swapchain image, so nothing reads them afterwards. They own their memory
+	// rather than taking a slice of the batched pool because the color format is
+	// the XR swapchain's, unknown until long after the pool is packed.
 	VkImage transient_color_image;
 	VkImageView transient_color_image_view;
 	VkDeviceMemory transient_color_memory;

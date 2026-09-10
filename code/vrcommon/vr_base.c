@@ -194,20 +194,13 @@ void VR_EnsureGraphicsInitialized( void )
 	// Creates the VkInstance and VkDevice through xrCreateVulkanInstanceKHR and xrCreateVulkanDeviceKHR
 	VR_Graphics_Init( vr_engine.appState.Instance, vr_engine.appState.SystemId );
 
-	// vr_foveationCaps is registered CVAR_ROM "none" in VR_InitCvars, which
-	// runs from CL_Init well before this function's first successful call
-	// (from CL_InitRef) creates the Vulkan device -- VR_FoveationCapsString
-	// has nothing to read that early. Refresh it here instead of folding it
-	// back into VR_InitCvars: VR_FoveationCapsString reports "none" on its
-	// own if VR_Graphics_Init just failed, so this is correct either way.
+	// VR_InitCvars registers this as CVAR_ROM "none" long before the Vulkan device
+	// exists, so it has to be refreshed once there is something to read.
 	Cvar_Set2( "vr_foveationCaps", VR_FoveationCapsString(), qtrue );
 
-	// Logged here rather than beside VR_GetSystemProperties in VR_Init: that call
-	// happens before Com_Init, while com_logfile is still NULL, so Com_Printf's
-	// logfile write would silently never reach qconsole.log. This is the only
-	// record of whether a given runtime and headset offer gaze, and of what became
-	// of the binding VR_InitInstanceInput suggested -- decided back in VR_Init, in
-	// that same too-early region, which is why vr_input.c has to hold the answer.
+	// Logged here rather than where it is decided, in VR_Init: that runs before
+	// Com_Init, where com_logfile is still NULL and the line would reach no file.
+	// vr_input.c holds the binding's answer for the same reason.
 	Com_Printf( "[OpenXR] Eye gaze: extension %s, system support %s, binding %s\n",
 		VR_HasEnabledInstanceExtension( XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME ) ? "yes" : "no",
 		vr_engine.systemProperties.SupportsEyeGaze ? "yes" : "no",

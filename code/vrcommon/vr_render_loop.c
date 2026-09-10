@@ -152,13 +152,10 @@ void VR_EndFrame(XrSession session, VR_SwapchainInfos* swapchains, XrView* views
 	const int colorWidth = (int)swapchains->color.width;
 	const int colorHeight = (int)swapchains->color.height;
 
-	// Both layer shapes below name the color swapchain, and naming one that
-	// has never released an image is rejected: xrEndFrame answers
+	// Naming a swapchain that has never released an image fails xrEndFrame with
 	// XR_ERROR_LAYER_INVALID, which XR_CHECK turns into exit(). A vid_restart
-	// builds a fresh swapchain part way through Com_Frame, and an ERR_DROP
-	// after that point longjmps past the screen update that would have drawn
-	// into it, leaving this the frame's first and only use of it. Submit an
-	// empty frame until the swapchain holds something.
+	// builds one mid-frame, and an ERR_DROP after that skips the screen update
+	// that would have drawn into it. Submit an empty frame until it holds one.
 	if (!swapchains->color.everReleased)
 	{
 		XrFrameEndInfo emptyFrameInfo = {};

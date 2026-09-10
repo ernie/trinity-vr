@@ -67,17 +67,11 @@ static void VR_VK_CreateSwapchain(
 		};
 		const VR_Bool formatListEnabled = VR_HasEnabledInstanceExtension("XR_KHR_vulkan_swapchain_format_list");
 
-		// Validation reports UNORM views on sRGB images the runtime created
-		// without VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT. These lines are the
-		// evidence for the next capture to say whether the runtime ignored
-		// this request or never saw it.
-		// The runtime's identity belongs with them, because there is a third
-		// outcome the other lines cannot show: vr_base.c records that a runtime
-		// reading XR_API_VERSION_1_0's patch level as the app's SDK version
-		// hands back a legacy profile that ignores the XrSwapchainCreateInfo
-		// next chain, which is where the format list is attached. Under that
-		// profile every line below reads positively and the request still never
-		// arrives.
+		// Validation reports UNORM views on sRGB images the runtime created without
+		// MUTABLE_FORMAT. These lines say whether the runtime ignored the request
+		// or never saw it -- the runtime's identity included, since a legacy profile
+		// drops the next chain the format list rides on, and then every line below
+		// reads positively while the request never arrives.
 		Com_Printf("[VRVK] Color swapchain: runtime %s, declared API %s\n",
 			VR_GetRuntimeDescription(), VR_GetDeclaredApiVersion());
 		Com_Printf("[VRVK] Color swapchain: XR_KHR_vulkan_swapchain_format_list %s on the instance\n",

@@ -24,23 +24,18 @@ extern vr_clientinfo_t vr;
 // bisector of the vertical field; eye-tracked mode holds the last gaze that located.
 static float s_foveationCenter[2][2] = { { 0.0f, 0.0f }, { 0.0f, 0.0f } };
 
-// Whether s_foveationCenter came from a gaze rather than from fixed centers.
-// It picks the renderer's tighter eye-tracked falloff, and it deliberately
-// stays set across a frame that fails to sample: the renderer rebuilds the
-// whole map whenever this flips, so clearing it on a blink would pulse the
-// island's size twice per blink.
+// Whether s_foveationCenter came from a gaze, which picks the tighter falloff.
+// Stays set across a frame that fails to sample: the renderer rebuilds the whole
+// map when it flips, so clearing it on a blink pulses the island's size twice.
 static qboolean s_gazeHeld = qfalse;
 
 // The display time the held centers were sampled at, in the same clock the
 // frame hands in, so the hold below can time itself out with no second clock.
 static XrTime s_gazeHeldTime = 0;
 
-// How long the centers are held with no valid sample before gaze is given up on
-// and the island goes back to fixed centers. A blink invalidates the pose for
-// ten to fifteen frames, so a second is ninety frames at 90 Hz: far past any
-// blink or squint, and still quick enough that gaze genuinely going away -- eye
-// tracking switched off, the headset lifted off -- reads as the effect settling
-// rather than as an island stuck where the player last looked.
+// How long centers are held with no valid sample before falling back to fixed.
+// A blink costs ten to fifteen frames, so a second clears any blink or squint
+// while still settling quickly when gaze goes away for real.
 #define VR_GAZE_HOLD_TIMEOUT_NS 1000000000LL
 
 
@@ -138,14 +133,10 @@ static qboolean VR_VK_Foveation_SampleGaze(VR_Engine* engine, XrTime displayTime
 		return qfalse;
 	}
 
-	// Whether an eye is being tracked right now, which is a different question
-	// from whether the space can be located, and is asked in a different place.
-	// A runtime that has lost the eye -- a blink, the headset off the face -- can
-	// keep handing back a location flagged valid and tracked while holding a
-	// default forward pose, with nothing in the location to say so; the pose
-	// action's own state is the other place to ask. Not every runtime answers
-	// honestly there either, and the streaming path this was written against does
-	// not, but the ones that do are the ones the hold below exists for
+	// Whether an eye is tracked right now is a different question from whether the
+	// space can be located, and lives in the action state. A runtime that has lost
+	// the eye can still hand back a location flagged valid and tracked while
+	// holding a default forward pose.
 	if (!VR_EyeGazeIsActive())
 	{
 		return qfalse;
@@ -199,13 +190,9 @@ void VR_VK_Foveation_Frame(VR_Engine* engine, XrTime displayTime)
 	const VR_FoveationCaps caps = VR_VK_Foveation_Caps();
 	// -Z is both the head's own forward and the axis an OpenXR pose faces along
 	const XrVector3f forward = { 0.0f, 0.0f, -1.0f };
-	// Fixed centers sit on the angular bisector of the vertical field, not the optical
-	// axis: a headset that gives more field one way than the other is stating where
-	// its designer expects the eye to go, so the island follows that lean. Shared by
-	// both places fixed centers get written -- the mode chosen outright, and gaze
-	// lost for long enough to give up on -- so those two can't drift into meaning
-	// different things by "fixed". On this hardware (44 up, 55 down) that is 5.5
-	// degrees below the axis.
+	// Fixed centers sit on the vertical field's angular bisector, not the optical
+	// axis: an asymmetric field states where its designer expects the eye to go.
+	// Hoisted so both places that write fixed centers mean the same thing by it.
 	const float bisectorMid = 0.5f * (vr.fov_angle_up + vr.fov_angle_down);
 	const XrVector3f bisector = { 0.0f, sinf(bisectorMid), -cosf(bisectorMid) };
 	int mode;
@@ -262,11 +249,9 @@ void VR_VK_Foveation_Frame(VR_Engine* engine, XrTime displayTime)
 			// -Z rotated by the gaze orientation, which is the direction OpenXR poses face
 			XrQuaternionf_RotateVector3f(&gazeDir, &gazePose.orientation, &forward);
 
-			// An eye that fell back holds the optical axis, not a gaze -- no longer
-			// what fixed mode uses either, now that it sits on the bisector. Committing
-			// it would put the tighter eye-tracked falloff on a center with no gaze
-			// behind it, so let it fail the sample and leave the held centers alone
-			// for the ladder below to judge.
+			// An eye that fell back holds its optical axis, which is neither a gaze
+			// nor what fixed mode uses. Failing the sample leaves the held centers
+			// for the ladder below rather than putting the tight falloff on it.
 			projected = VR_VK_Foveation_ProjectToEyes(&gazeDir, centers);
 		}
 

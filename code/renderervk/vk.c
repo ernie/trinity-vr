@@ -511,11 +511,10 @@ static void record_image_layout_transition( VkCommandBuffer command_buffer, VkIm
 // object names
 #define SET_OBJECT_NAME(obj,objName,objType) vk_set_object_name( (uint64_t)(obj), (objName), (objType) )
 
-// The two enumerations agree on every value from UNKNOWN through COMMAND_POOL
-// and part company above it, where debug_report numbers the WSI types in
-// sequence and VkObjectType gives them their extension ranges. Every type this
-// renderer names is in the shared run; anything outside it is named without a
-// type, which debug_utils allows, rather than named as the wrong one.
+// The two enumerations agree from UNKNOWN through COMMAND_POOL and diverge above
+// it, where debug_report numbers the WSI types in sequence. Every type named here
+// is in the shared run; anything outside it goes unnamed, which debug_utils
+// allows, rather than named as the wrong type.
 static VkObjectType vk_object_type( VkDebugReportObjectTypeEXT objType )
 {
 	if ( (unsigned)objType <= (unsigned)VK_DEBUG_REPORT_OBJECT_TYPE_COMMAND_POOL_EXT ) {
@@ -527,11 +526,10 @@ static VkObjectType vk_object_type( VkDebugReportObjectTypeEXT objType )
 
 static void vk_set_object_name( uint64_t obj, const char *objName, VkDebugReportObjectTypeEXT objType )
 {
-	// vk_shutdown destroys the device before it zeroes the vk struct, and clears
-	// the instance entry points after both, so the raw pointer stays live across
-	// a window in which vk.device is already gone. vk.debugNames falls in the
-	// same memset that clears vk.device, so gating on the flag rather than on
-	// the pointer alone is what keeps a late call out of that window.
+	// vk_shutdown destroys the device, then zeroes the struct, then clears the
+	// instance entry points, so the pointer stays live in a window where vk.device
+	// is gone. debugNames is cleared by the same memset as vk.device, which is
+	// what keeps a late call out of that window.
 	if ( vk.debugNames && qvkSetDebugUtilsObjectNameEXT && obj )
 	{
 		VkDebugUtilsObjectNameInfoEXT info;
@@ -545,26 +543,16 @@ static void vk_set_object_name( uint64_t obj, const char *objName, VkDebugReport
 }
 
 
-// vkGetInstanceProcAddr resolving vkSetDebugUtilsObjectNameEXT proves only
-// that the entry point exists; it proves nothing about whether a validation
-// layer is actually in the chain for this instance. Three rounds of reading
-// a capture that showed no object names spent real time unable to tell
-// whether naming was broken or there was simply nothing named to report. A
-// messenger callback firing at least once settles it: it can only run
-// inside a layer that is receiving.
-//
-// It is created in ordinary runs too, where no validation layer is loaded,
-// no callback ever fires, and it costs nothing beyond the create/destroy
-// pair at startup and shutdown.
+// Resolving vkSetDebugUtilsObjectNameEXT proves the entry point exists, not that
+// a layer is in the chain for this instance. A messenger callback firing settles
+// it: that can only happen inside a layer which is receiving. Created in ordinary
+// runs too, where nothing fires and it costs one create/destroy pair.
 static VkDebugUtilsMessengerEXT vk_debug_messenger = VK_NULL_HANDLE;
 static qboolean vk_messenger_receiving = qfalse;
 
-// Invoked inline by the layer on whichever thread made the Vulkan call, so it
-// must not re-enter Vulkan and must not allocate. ri.Printf does neither: it
-// formats into a stack buffer and hands it to the console and qconsole.log.
-// This renderer has no render thread, so the client's own calls all arrive on
-// one thread; a report the runtime provokes from another would at worst
-// interleave a line, never crash.
+// Invoked inline by the layer on whichever thread made the call, so it must not
+// re-enter Vulkan or allocate. ri.Printf does neither, and a report provoked
+// from another thread would at worst interleave a line.
 static VKAPI_ATTR VkBool32 VKAPI_CALL vk_debug_messenger_callback(
 	VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
 	VkDebugUtilsMessageTypeFlagsEXT messageTypes,
@@ -782,12 +770,10 @@ static void vk_fill_render_pass_dependencies( VkSubpassDependency deps[2] )
 {
 	Com_Memset( deps, 0, sizeof( VkSubpassDependency ) * 2 );
 
-	// External -> subpass 0. Includes depth stages so an earlier frame's depth
-	// work finishes before this pass clears. Both fragment-test stages on the
-	// destination side: a second view in the same frame clears depth mid-pass
-	// through vkCmdClearAttachments, which writes in the late stage as well as
-	// the early one, and naming only the early one leaves that clear unordered
-	// against the layout transition ahead of the pass
+	// External -> subpass 0. Depth stages so an earlier frame's depth work
+	// finishes before this pass clears, and both fragment-test stages on the
+	// destination because a second view in the same frame clears depth mid-pass,
+	// which writes in the late stage too.
 	deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
 	deps[0].dstSubpass = 0;
 	deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
@@ -1153,12 +1139,10 @@ static void vk_create_main_render_pass( const char *why )
 	}
 
 	if ( vk.xr.foveationActive ) {
-		// Read during rasterization, never written by the pass, and its contents
-		// are put there by the copy in vk_begin_main_render_pass. In fixed mode that
-		// copy runs once, not on every frame, so this pass must STORE what it loaded —
-		// a DONT_CARE here would let a driver discard the map's one and only upload.
-		// Appended after the depth resolve so both non-cleared attachments trail the
-		// cleared ones and clearValueCount stays as it is.
+		// Read during rasterization, never written, and filled by a copy that in
+		// fixed mode runs once rather than per frame -- so it must STORE what it
+		// loaded, or a driver may discard the map's only upload. Appended after the
+		// depth resolve to keep both non-cleared attachments behind the cleared ones.
 		attachments[attachmentCount].format = VK_FORMAT_R8_UINT;
 		attachments[attachmentCount].samples = VK_SAMPLE_COUNT_1_BIT;
 		attachments[attachmentCount].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -1382,16 +1366,10 @@ static void vk_create_render_passes( void )
 			SET_OBJECT_NAME( vk.render_pass.blur[i], va( "render pass - XR blur %i (multiview)", i ), VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT );
 		}
 
-		// Post-bloom: blends bloom into the color the main pass produced and
-		// carries every draw after the scene, the 2D, the flares and the HUD
-		// sprite. One sample at every MSAA setting since the main pass resolves
-		// both color and depth: nothing drawn here benefits from multisampling,
-		// and the trade is an aliased line where a sprite or flare meets world
-		// geometry. Skip creating it with bloom off (and leave no dead setup
-		// behind): create_pipeline only sees RENDER_PASS_POST_BLOOM when
-		// vk.renderPassIndex is set to it, which only vk_bloom does, and the
-		// bloom blend pipeline that targets this pass is built inside a block
-		// already gated on r_bloom->integer.
+		// Post-bloom carries every draw after the scene: 2D, flares, HUD sprite.
+		// One sample whatever the MSAA setting, since the main pass resolves both
+		// color and depth and nothing drawn here benefits from multisampling; the
+		// trade is an aliased line where a sprite meets world geometry.
 		if ( r_bloom->integer )
 		{
 			attachments[0].format = vk.color_format;
@@ -1444,11 +1422,10 @@ static void vk_create_render_passes( void )
 				postAttachmentCount = 3;
 			}
 
-			// Renderpass2, as the main pass, so the two share one converter. It
-			// carries no shading rate attachment: only the scene pass is foveated,
-			// so the 2D, the flares and the HUD sprite drawn here stay full rate.
-			// deps[0..1] are the depth-aware external pair; deps[2] belongs to the
-			// color-only passes above and does not apply here.
+			// Renderpass2, as the main pass, so both share one converter. No shading
+			// rate attachment: only the scene is foveated, so the 2D, flares and HUD
+			// sprite drawn here stay full rate. deps[2] belongs to the color-only
+			// passes above and does not apply.
 			vk.render_pass.post_bloom = vk_create_render_pass2( attachments, postAttachmentCount, &subpass,
 				viewMask, correlationMask, deps, 2, NULL, NULL, 0, 0 );
 			SET_OBJECT_NAME( vk.render_pass.post_bloom, "render pass - XR post bloom (multiview)", VK_DEBUG_REPORT_OBJECT_TYPE_RENDER_PASS_EXT );
@@ -1503,18 +1480,11 @@ static void vk_create_render_passes( void )
 		subpass.pColorAttachments = &colorRef0;
 		subpass.pDepthStencilAttachment = &hudDepthRef;
 
-		// Dependencies: wait for sampling before load, complete writes before sampling
-		// Neither leg is by-region: the frame command buffer's fragment shader
-		// samples this HUD texture at arbitrary coordinates, in a differently
-		// sized framebuffer of its own, so there is no matching region for the
-		// flag to mean anything about.
-		// The incoming leg also names the previous frame's depth writes: the HUD
-		// depth image is one image shared by every frame slot, so this pass's
-		// depth clear has to be ordered against the late fragment tests of the
-		// slot before it, which is what the outgoing leg's source scope names.
-		// The destination names both fragment-test stages for the same reason
-		// the main pass does: a 3D model drawn into the HUD buffer takes the
-		// view path and clears depth mid-pass, which writes in the late stage.
+		// Not by-region: the frame buffer samples this texture at arbitrary
+		// coordinates in a differently sized framebuffer. Depth stages on both
+		// legs because one HUD depth image is shared by every frame slot, and
+		// both fragment-test stages because a 3D model drawn here clears depth
+		// mid-pass, which writes in the late one.
 		hudDeps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
 		hudDeps[0].dstSubpass = 0;
 		hudDeps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
@@ -2699,11 +2669,10 @@ static void init_vulkan_library( void )
 			vk.samplerAnisotropy ? "supported" : "not supported" );
 	}
 
-	// Depth-stencil resolve modes for the main pass. MAX keeps the nearest
-	// sample under reversed depth, so the HUD sprite and the flares occlude
-	// conservatively where a pixel's samples disagree. SAMPLE_ZERO is in both
-	// supported lists by specification and is the fallback. Nothing reads the
-	// resolved stencil, so its mode is NONE unless the device couples the two.
+	// MAX keeps the nearest sample under reversed depth, so the HUD sprite and
+	// flares occlude conservatively where a pixel's samples disagree; SAMPLE_ZERO
+	// is guaranteed supported and is the fallback. Nothing reads resolved stencil,
+	// so its mode is NONE unless the device couples the two.
 	{
 		VkPhysicalDeviceDepthStencilResolveProperties resolveProps;
 		VkPhysicalDeviceProperties2 props2;
@@ -3206,15 +3175,11 @@ void vk_init_descriptors( void )
 	}
 	else if ( vk.screenMap.color_image_view )
 	{
-		// Direct mode has no scene framebuffer, so the two sets the desktop mirror
-		// binds at 1 and 2 have no image of their own. desktopmirror.frag declares
-		// both samplers, which makes them statically used and so requires real
-		// handles on every draw, even though only its HDR reconstruction reads them
-		// and HDR cannot be active without the FBO. The screen map's color stands
-		// in: it exists in both modes, it is the two-layer array the shader's
-		// sampler2DArray expects, and in direct mode it never leaves
-		// SHADER_READ_ONLY_OPTIMAL, because no shader is given a screen map without
-		// the FBO and its pass therefore never runs.
+		// Direct mode has no scene framebuffer, but desktopmirror.frag declares both
+		// samplers statically, so they need real handles on every draw even though
+		// only its HDR path reads them and HDR needs the FBO. The screen map's color
+		// stands in: present in both modes, the two-layer array the sampler expects,
+		// and never out of SHADER_READ_ONLY_OPTIMAL here since its pass never runs.
 		VkDescriptorImageInfo placeholder;
 
 		alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -4684,11 +4649,9 @@ static void vk_create_shading_rate_image( uint32_t fbWidth, uint32_t fbHeight, u
 		return;
 	}
 
-	// One byte a texel: a rate is a single R8_UINT value, not the two R8G8_UNORM
-	// fractions a density map carries. One buffer a frame slot: the two barriers
-	// order the GPU's copy against the GPU's rate reads, but the host writes this
-	// memory, and only vk_begin_frame's fence wait on the slot it is reusing
-	// orders that write against a copy the GPU has not run yet.
+	// One byte a texel, a rate being a single R8_UINT rather than a density map's
+	// two fractions. One buffer a slot because the host writes this memory, and
+	// only vk_begin_frame's fence wait orders that against a copy not yet run.
 	Com_Memset( &bufferInfo, 0, sizeof( bufferInfo ) );
 	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 	bufferInfo.size = (VkDeviceSize)xr->shadingRateWidth * xr->shadingRateHeight * xr->shadingRateLayers;
@@ -5235,15 +5198,10 @@ void vk_initialize( void )
 		vkSamples = VK_SAMPLE_COUNT_1_BIT;
 	}
 
-	// The post pass loads a resolved depth instead of the samples, and with
-	// bloom off there is no post pass at all: vk_bloom() never begins it, so a
-	// resolve nobody reads is pure cost (measured 1.69ms to 1.91 at 4x MSAA).
-	// Where bloom is on, the resolve target exists wherever MSAA does: a pass
-	// declaring single-sample color and multisampled depth is invalid, and its
-	// framebuffer has nothing else to bind. The test is the realized sample
-	// count, not vk.msaaActive, which is decided from the cvar before the
-	// clamp above and can survive it at one sample. r_bloom is CVAR_LATCH, like
-	// the other terms here, so this stays valid for the session.
+	// Only the post pass reads a resolved depth, and with bloom off there is no
+	// post pass, so the resolve would be pure cost. Tests the realized sample
+	// count rather than vk.msaaActive, which comes from the cvar before the clamp
+	// above and can survive it at one sample.
 	vk.depthResolveActive = ( vk.fboActive && vk.msaaActive && vkSamples > VK_SAMPLE_COUNT_1_BIT && r_bloom->integer ) ? qtrue : qfalse;
 
 	vk.screenMapSamples = MIN( vkMaxSamples, VK_SAMPLE_COUNT_4_BIT );
@@ -5402,12 +5360,8 @@ void vk_initialize( void )
 	Q_strncpyz( glConfig.vendor_string, vendor_name, sizeof( glConfig.vendor_string ) );
 	Q_strncpyz( glConfig.renderer_string, renderer_name( &props ), sizeof( glConfig.renderer_string ) );
 
-	// The device itself still goes unnamed. debug_marker could not carry it:
-	// the Khronos layer records the device in an instance-scope object map but
-	// looks the handle up in the device-scope one, so it could only reject the
-	// name. debug_utils has no such split and would take it, but the renderer
-	// string already reaches the console at init and nothing has asked for the
-	// name back, so the option is left declined rather than exercised.
+	// The device goes unnamed: the renderer string already reaches the console at
+	// init, so the name buys nothing back.
 
 	// do early texture mode setup to avoid redundant descriptor updates in GL_SetDefaultState()
 	vk.samplers.filter_min = -1;
@@ -6120,14 +6074,11 @@ __cleanup:
 	Com_Memset( &vk_world, 0, sizeof( vk_world ) );
 	
 	if ( code != REF_KEEP_CONTEXT ) {
-		// The messenger is instance-scoped, so it is torn down here rather than
-		// with the device work above: this is the branch that drops vk_instance
-		// and clears the instance entry points, and once the destroy pointer is
-		// cleared the messenger could not be destroyed at all. Nothing is
-		// stranded on the other side of the branch: RE_Shutdown calls
-		// vk_shutdown only when code is not REF_KEEP_CONTEXT, and a
-		// REF_KEEP_CONTEXT pass leaves vk.active set so vk_initialize does not
-		// run again and re-create it: one create, one destroy, per instance.
+		// Instance-scoped, so it is torn down in the branch that drops vk_instance
+		// rather than with the device work above -- once the instance entry points
+		// are cleared it could not be destroyed at all. Nothing strands on the
+		// other side: a REF_KEEP_CONTEXT pass leaves vk.active set, so nothing
+		// re-creates it. One create, one destroy, per instance.
 		if ( vk_debug_messenger != VK_NULL_HANDLE && qvkDestroyDebugUtilsMessengerEXT ) {
 			qvkDestroyDebugUtilsMessengerEXT( vk_instance, vk_debug_messenger, NULL );
 		}
@@ -6640,13 +6591,10 @@ void vk_create_post_process_pipelines( void )
 	width = vk.xr.width;
 	height = vk.xr.height;
 
-	// The bloom images and the post_bloom framebuffer are allocated in
-	// vk_create_attachments()/vk_create_fbo_framebuffers() from gls.captureWidth/
-	// Height, not vk.xr.width/height. Both values come from VR_GetSupersampledResolution,
-	// but through two independent calls (window setup in sdl_glimp.c, swapchain
-	// creation in vr_vk_swapchains.c) with nothing tying them together, so the
-	// bloom extract/blur/blend pipelines below follow the memory that actually
-	// exists rather than the XR swapchain size the gamma pipeline targets.
+	// The bloom images are allocated from gls.captureWidth/Height, not
+	// vk.xr.width/height. Both derive from VR_GetSupersampledResolution but
+	// through independent calls with nothing tying them together, so the pipelines
+	// below follow the memory that exists rather than the XR swapchain size.
 	bloomWidth = gls.captureWidth;
 	bloomHeight = gls.captureHeight;
 
@@ -6785,11 +6733,9 @@ void vk_create_post_process_pipelines( void )
 		vk.gamma_pipeline = VK_NULL_HANDLE;
 	}
 
-	// This function does not rebuild the debug tint pipeline (it is built
-	// lazily, from vk_end_frame), but it can run after vk.render_pass.main was
-	// rebuilt underneath it; dropping a still-valid handle here just costs one
-	// more lazy rebuild next time r_foveationDebug draws, the same hitch the
-	// cvar already accepts on first enable.
+	// The tint pipeline is built lazily from vk_end_frame, and this can run after
+	// the main pass was rebuilt under it. Dropping a still-valid handle costs one
+	// extra lazy rebuild, the hitch the cvar already takes on first enable.
 	if ( vk.foveation_debug_pipeline != VK_NULL_HANDLE ) {
 		vk_wait_idle();
 		qvkDestroyPipeline( vk.device, vk.foveation_debug_pipeline, NULL );
@@ -7093,15 +7039,10 @@ static void vk_create_foveation_debug_pipeline( void )
 
 	blend_attachments[0] = attachment_blend_state;
 
-	// vk.render_pass.main's subpass declares a second (emissive) color
-	// attachment whenever vk.hdrActive, independent of MSAA -- see the two
-	// "subpass.colorAttachmentCount = 2" sites in vk_create_main_render_pass.
-	// VkPipelineColorBlendStateCreateInfo::attachmentCount must match the
-	// subpass's color attachment count exactly, so this pipeline needs a
-	// second entry too. colorWriteMask 0 keeps the tint out of the emissive
-	// attachment, which the HDR desktop mirror later samples to encode: a
-	// screen-space overlay meant only for the headset's eye view must not
-	// bleed into that encode.
+	// The main subpass declares a second, emissive color attachment under
+	// vk.hdrActive, and the blend state's attachmentCount must match it exactly.
+	// colorWriteMask 0 keeps the tint out of that attachment, which the HDR
+	// mirror samples to encode -- an eye-view overlay must not reach it.
 	if ( vk.hdrActive ) {
 		blend_attachments[1] = attachment_blend_state;
 		blend_attachments[1].colorWriteMask = 0;
@@ -7239,11 +7180,9 @@ VkPipeline create_pipeline( const Vk_Pipeline_Def *def, renderPass_t renderPassI
 	// Q3VR: All shaders use multiview for VR stereo rendering.
 	// gl_ViewIndex is 0 for single-layer targets (HUD buffer).
 
-	// the emissive attachment only exists in these passes; fragment-module
-	// choice below must agree with the blend-state attachmentCount decision
-	// or the pipeline gets an unconsumed location-1 output. RENDER_PASS_MAIN_2D
-	// draws into the same subpass as RENDER_PASS_MAIN, so it inherits the same
-	// attachment count.
+	// The emissive attachment exists only in these passes, and the fragment module
+	// chosen below must agree with the blend state's attachmentCount or the
+	// pipeline gets an unconsumed location-1 output. MAIN_2D shares MAIN's subpass.
 	const qboolean emissiveActive = ( renderPassIndex == RENDER_PASS_MAIN || renderPassIndex == RENDER_PASS_MAIN_2D || renderPassIndex == RENDER_PASS_POST_BLOOM ) && vk.hdrActive;
 	const int fs_em = emissiveActive ? 0 : 1;
 
@@ -8215,13 +8154,10 @@ VkPipeline create_pipeline( const Vk_Pipeline_Def *def, renderPass_t renderPassI
 	create_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
 	create_info.pNext = NULL;
 	if ( vk.xr.foveationActive ) {
-		// Static combiners, no dynamic state. A pipeline that chains nothing
-		// here gets Vulkan's defaults -- a 1x1 pipeline rate and KEEP for both
-		// combiners -- and a second combiner of KEEP discards the attachment,
-		// so without this the map would be correct and change nothing.
-		// The attachment replaces the pipeline rate in the pass that has one;
-		// every other pass declares no rate attachment, so KEEP there leaves
-		// the 1x1 pipeline rate standing.
+		// Static combiners. The default second combiner is KEEP, which discards
+		// the attachment, so without this the map would be correct and do nothing.
+		// REPLACE only matters in the pass that declares a rate attachment; the
+		// others keep their 1x1 pipeline rate.
 		Com_Memset( &shadingRateState, 0, sizeof( shadingRateState ) );
 		shadingRateState.sType = VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR;
 		shadingRateState.fragmentSize.width = 1;
@@ -8317,12 +8253,10 @@ static uint32_t vk_alloc_pipeline( const Vk_Pipeline_Def *def ) {
 VkPipeline vk_gen_pipeline( uint32_t index ) {
 	if ( index < vk.pipelines_count ) {
 		VK_Pipeline_t *pipeline = vk.pipelines + index;
-		// Main-pass draws the player reads get their own handle so they can opt
-		// out of the rate map. In the FBO path with bloom on these land in the
-		// post pass instead and never reach here; with bloom off, and in direct
-		// mode, this is the only thing keeping them sharp. rateExempt covers the
-		// in-world HUD sprite, a world-space quad that fails the projection2D
-		// test while needing the same treatment.
+		// Main-pass draws the player reads get their own handle so they can opt out
+		// of the rate map -- the only thing keeping them sharp with bloom off and in
+		// direct mode. rateExempt covers the in-world HUD sprite, which needs the
+		// same treatment but fails the projection2D test.
 		renderPass_t pass = vk.renderPassIndex;
 
 		if ( pass == RENDER_PASS_MAIN && ( backEnd.projection2D || vk.rateExempt ) ) {
@@ -8514,11 +8448,9 @@ static void clamp_clear_rect_to_render_area( VkRect2D *r ) {
 	if ( r->offset.y < 0 )
 		r->offset.y = 0;
 
-	// extent fields are unsigned: check the offset against the render area
-	// before subtracting, so an offset already past it yields a zero extent
-	// instead of an underflowed (huge) one. The offset comes back to the bound
-	// with it, because containment is tested as offset plus extent and an empty
-	// rect left beyond the render area still fails that test.
+	// extent is unsigned, so an offset past the render area must be caught before
+	// subtracting or the extent underflows to huge. The offset comes back to the
+	// bound with it, since containment is tested as offset plus extent.
 	if ( r->offset.x >= vk.renderWidth ) {
 		r->offset.x = (int32_t)vk.renderWidth;
 		r->extent.width = 0;
@@ -9774,21 +9706,10 @@ void vk_begin_main_render_pass( void )
 	vk.inRenderPass = qtrue;
 
 	{
-		// Safety net: guarantee the eye color target has DEFINED contents across
-		// its FULL extent on the first 3D pass of the frame. The render-pass
-		// LOAD_OP for the color/resolve target is config-dependent (DONT_CARE when
-		// MSAA resolves it, CLEAR otherwise) and only ever covers what the subpass
-		// actually rasterizes. A game module that submits a refdef smaller than the
-		// per-eye render target would leave the surrounding region undefined; since
-		// the color image is double-buffered, that region alternates between two
-		// stale/undefined images each frame and the gamma pass composites the WHOLE
-		// FBO to the XR swapchain -> white/black strobing outside the view rect.
-		//
-		// vkCmdClearAttachments clears the rects passed here directly and ignores
-		// the dynamic scissor, so this covers the whole extent regardless of the
-		// view rectangle set later by RB_BeginDrawingView. For the in-tree cgame
-		// (which fills the eye every frame) this is a negligible, visually
-		// invisible clear.
+		// The load op covers only what the subpass rasterizes, so a refdef smaller
+		// than the eye target leaves the surround undefined -- and the gamma pass
+		// composites the whole FBO, strobing it. Clear rects ignore the dynamic
+		// scissor, so this covers the extent whatever view rect follows.
 		VkClearAttachment clearAttachment;
 		VkClearRect clearRect;
 
@@ -10733,12 +10654,9 @@ void vk_end_frame( void )
 		submit_info.commandBufferCount = bufferCount;
 		submit_info.pCommandBuffers = buffers;
 
-		// A signal no blit consumed is still outstanding, and signaling a
-		// semaphore that is already signaled and unwaited is invalid. The
-		// mirror drains it on the skip paths it knows about, but a frame it
-		// never runs on at all leaves it set, and the arm below that does not
-		// signal used to discard the flag along with the client's only record
-		// of it.
+		// Signaling an already-signaled, unwaited semaphore is invalid. The mirror
+		// drains it on the skip paths it knows about, but a frame it never runs on
+		// leaves it set.
 		vk_drain_rendering_semaphore();
 
 		if ( mirrorEnabled && !vk_is_window_minimized() && vk.swapchain != VK_NULL_HANDLE ) {
@@ -12263,17 +12181,10 @@ finish_desktop_mirror:
 	// End and submit command buffer
 	VK_CHECK( qvkEndCommandBuffer( vk.desktopBlitCmd ) );
 
-	// Submit blit command buffer. Both waits are at ALL_COMMANDS rather than
-	// TRANSFER because record_image_layout_transition takes each barrier's source
-	// stage from the old layout, so the transitions above run at TOP_OF_PIPE (the
-	// acquired image out of UNDEFINED), at COLOR_ATTACHMENT_OUTPUT and
-	// FRAGMENT_SHADER (the XR image in and out of sampling) and at TRANSFER, and a
-	// TRANSFER wait orders none of the first three. This is one submission a frame
-	// and sits outside the measured span, so a mask that covers every stage beats
-	// one matched per barrier that would rot as mirror styles are added.
-	// - Acquire semaphore: presentation engine is done reading before we write
-	// - renderingCompleteSem: XR rendering is done before we sample its output
-	// - Signal per-image semaphore: indexed by acquired image, presentation waits on this
+	// ALL_COMMANDS rather than TRANSFER: the transitions above take their source
+	// stage from the old layout, so they run at TOP_OF_PIPE, COLOR_ATTACHMENT_OUTPUT
+	// and FRAGMENT_SHADER as well, none of which a TRANSFER wait would order. One
+	// submission a frame, outside the measured span.
 	{
 		VkSemaphore waitSemaphores[2];
 		VkPipelineStageFlags waitStages[2];
@@ -12715,13 +12626,9 @@ qboolean vk_bloom( void )
 	vk_reset_descriptor( VK_DESC_UNIFORM );
 	vk_update_descriptor( VK_DESC_UNIFORM, vk.cmd->uniform_descriptor );
 
-	// Restore state for continued 2D rendering (Quake3e pattern). The pipeline is
-	// deliberately not restored: the post pass is single-sample and so is not
-	// render-pass-compatible with the main pass, and a draw here binds its own
-	// handle for this pass through vk_bind_pipeline. As the code stands this
-	// block is unreachable anyway - vk_begin_render_pass clears the tracker on
-	// every begin, and the passes above bind their pipelines raw, so the guard
-	// is always false here.
+	// Restore state for continued 2D rendering (Quake3e pattern). Not the pipeline:
+	// the post pass is single-sample and so not render-pass-compatible with the
+	// main pass, and a draw here binds its own handle through vk_bind_pipeline.
 	if ( vk.cmd->last_pipeline != VK_NULL_HANDLE )
 	{
 		vk_update_mvp( NULL );
@@ -15088,11 +14995,9 @@ static qboolean vk_recreate_xr_render_pass( VkFormat colorFormat, VkFormat depth
 		return qfalse;
 	}
 
-	// The main pass renders into the FBO or the swapchain image depending on
-	// the mode; direct mode is what this function's XR color format is for.
-	// Direct mode renders into the swapchain image through the UNORM view, the
-	// same view the gamma pass writes under FBO: Quake 3 has no linear working
-	// space, so an sRGB view would encode every color a second time
+	// Direct mode renders into the swapchain image through the UNORM view, the same
+	// view the gamma pass writes under FBO: Quake 3 has no linear working space, so
+	// an sRGB view would encode every color a second time.
 	vk.mainColorFormat = vk.fboActive ? vk.color_format : vk_get_unorm_format( colorFormat );
 
 	vk_create_main_render_pass( "XR formats known" );
