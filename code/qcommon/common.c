@@ -2883,7 +2883,7 @@ void Com_Init( char *commandLine ) {
 
 	s = va("%s %s %s", Q3_VERSION, PLATFORM_STRING, PRODUCT_DATE );
 	com_version = Cvar_Get ("version", s, CVAR_ROM | CVAR_SERVERINFO );
-	Cvar_Get( "com_engine", va( "trinity-vr/%s", Q3VR_VERSION ), CVAR_ROM );
+	Cvar_Get( "com_engine", va( "trinity-vr/%s", TRINITY_VR_VERSION ), CVAR_ROM );
 
 	// single entry point of the extension system: VMs read this to learn the
 	// trap_GetValue syscall number, then discover extensions by name

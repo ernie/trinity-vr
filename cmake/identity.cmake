@@ -4,7 +4,7 @@ set(PROJECT_VERSION 1.0.0)
 # Override version from CI tag (GITHUB_REF_NAME) or git tag
 if(DEFINED ENV{GITHUB_REF_NAME} AND "$ENV{GITHUB_REF_NAME}" MATCHES "^v([0-9]+\\.[0-9]+(\\.[0-9]+)?)")
     set(PROJECT_VERSION "${CMAKE_MATCH_1}")
-    set(Q3VR_VERSION_STRING "$ENV{GITHUB_REF_NAME}")
+    set(TRINITY_VR_VERSION_STRING "$ENV{GITHUB_REF_NAME}")
 elseif(EXISTS "${CMAKE_SOURCE_DIR}/.git")
     execute_process(
         COMMAND git describe --tags --abbrev=0
@@ -22,16 +22,16 @@ elseif(EXISTS "${CMAKE_SOURCE_DIR}/.git")
     execute_process(
         COMMAND git describe --tags --always --dirty
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        OUTPUT_VARIABLE Q3VR_VERSION_STRING
+        OUTPUT_VARIABLE TRINITY_VR_VERSION_STRING
         OUTPUT_STRIP_TRAILING_WHITESPACE
         ERROR_QUIET
         RESULT_VARIABLE GIT_DESCRIBE_RESULT)
 
-    if(NOT GIT_DESCRIBE_RESULT EQUAL 0 OR NOT Q3VR_VERSION_STRING)
-        set(Q3VR_VERSION_STRING "unknown")
+    if(NOT GIT_DESCRIBE_RESULT EQUAL 0 OR NOT TRINITY_VR_VERSION_STRING)
+        set(TRINITY_VR_VERSION_STRING "unknown")
     endif()
 else()
-    set(Q3VR_VERSION_STRING "unknown")
+    set(TRINITY_VR_VERSION_STRING "unknown")
 endif()
 
 set(SERVER_NAME trinityvr-ded)
