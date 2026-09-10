@@ -548,7 +548,7 @@ typedef struct {
 	// Per-image semaphores to avoid reuse before presentation consumes them
 	VkSemaphore desktopBlitComplete[MAX_SWAPCHAIN_IMAGES];     // Signaled when blit is done, waited by present
 	VkSemaphore renderingCompleteSem;   // Signals when XR rendering is done, waited by desktop blit
-	qboolean renderingCompleteSemSignaled;  // True if renderingCompleteSem was signaled this frame
+	qboolean renderingCompleteSemSignaled;  // renderingCompleteSem holds an outstanding signal; it can outlive the frame that raised it
 
 	// HDR display output (desktop mirror scRGB FP16) + headset wide-gamut
 	qboolean hdrColorspaceExt;   // VK_EXT_swapchain_colorspace instance ext present

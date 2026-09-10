@@ -33,6 +33,14 @@ static uint32_t numRequiredExtensions = 0;
 static XrExtensionProperties* s_instanceExtensions = NULL;
 static uint32_t s_numInstanceExtensions = 0;
 
+// Name and version from VR_Init's xrGetInstanceProperties, kept so callers can
+// name the runtime without asking a second time. Empty before VR_Init runs.
+static char s_runtimeDescription[XR_MAX_RUNTIME_NAME_SIZE + 32] = "";
+
+// The XrVersion VR_Init declares to xrCreateInstance, kept so callers can
+// print the same value instance creation used. Empty before VR_Init runs.
+static char s_declaredApiVersion[32] = "";
+
 static void VR_LogLine(const char* line)
 {
 	fprintf(stderr, "[OpenXR] %s\n", line);
@@ -89,6 +97,31 @@ VR_Bool VR_HasInstanceExtension(const char* name)
 		}
 	}
 	return VR_FALSE;
+}
+
+// VR_HasInstanceExtension answers what the runtime advertises; this answers
+// what was enabled. The list goes to xrCreateInstance unaltered, under a check
+// with no retry and no fallback, so a running process is proof that every name
+// still in it was accepted.
+VR_Bool VR_HasEnabledInstanceExtension(const char* name)
+{
+	uint32_t i;
+	for (i = 0; i < numRequiredExtensions; ++i) {
+		if (strcmp(requiredExtensionNames[i], name) == 0) {
+			return VR_TRUE;
+		}
+	}
+	return VR_FALSE;
+}
+
+const char* VR_GetRuntimeDescription(void)
+{
+	return s_runtimeDescription;
+}
+
+const char* VR_GetDeclaredApiVersion(void)
+{
+	return s_declaredApiVersion;
 }
 
 static void VR_BuildExtensionList(void)
@@ -167,19 +200,22 @@ VR_Engine* VR_Init( void )
 	// legacy profile that ignores the XrSwapchainCreateInfo next chain
 	const char* appName = "Quake 3 Arena";
 	const XrVersion apiVersion = XR_API_VERSION_1_0;
+	Com_sprintf(s_declaredApiVersion, sizeof(s_declaredApiVersion), "%u.%u.%u",
+		XR_VERSION_MAJOR(apiVersion), XR_VERSION_MINOR(apiVersion), XR_VERSION_PATCH(apiVersion));
 	XR_CHECK(
-		VR_CreateInstance(appName, apiVersion, numRequiredExtensions, requiredExtensionNames, &vr_engine.appState.Instance), 
+		VR_CreateInstance(appName, apiVersion, numRequiredExtensions, requiredExtensionNames, &vr_engine.appState.Instance),
 		"Failed to create OpenXR instance");
 
 	XrInstanceProperties instanceInfo;
 	instanceInfo.type = XR_TYPE_INSTANCE_PROPERTIES;
 	instanceInfo.next = NULL;
 	XR_CHECK(xrGetInstanceProperties(vr_engine.appState.Instance, &instanceInfo), "Failed to query OpenXR instance properties");
-	fprintf(stdout, "[OpenXR] Runtime: %s | Version: %u.%u.%u\n",
+	Com_sprintf(s_runtimeDescription, sizeof(s_runtimeDescription), "%s %u.%u.%u",
 		instanceInfo.runtimeName,
 		XR_VERSION_MAJOR(instanceInfo.runtimeVersion),
 		XR_VERSION_MINOR(instanceInfo.runtimeVersion),
 		XR_VERSION_PATCH(instanceInfo.runtimeVersion));
+	fprintf(stdout, "[OpenXR] Runtime: %s\n", s_runtimeDescription);
 
 	VR_CreateDebugUtilsMessenger(vr_engine.appState.Instance, &vr_engine.appState.DebugUtilsMessenger);
 

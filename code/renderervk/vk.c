@@ -164,6 +164,7 @@ static PFN_vkDebugMarkerSetObjectNameEXT				qvkDebugMarkerSetObjectNameEXT;
 // forward declarations
 VkPipeline create_pipeline( const Vk_Pipeline_Def *def, renderPass_t renderPassIndex, uint32_t def_index );
 static qboolean vk_is_window_minimized( void );
+static void vk_drain_rendering_semaphore( void );
 
 static uint32_t find_memory_type( uint32_t memory_type_bits, VkMemoryPropertyFlags properties ) {
 	VkPhysicalDeviceMemoryProperties memory_properties;
@@ -1392,13 +1393,25 @@ static void vk_create_render_passes( void )
 		subpass.pDepthStencilAttachment = &hudDepthRef;
 
 		// Dependencies: wait for sampling before load, complete writes before sampling
+		// Neither leg is by-region: the frame command buffer's fragment shader
+		// samples this HUD texture at arbitrary coordinates, in a differently
+		// sized framebuffer of its own, so there is no matching region for the
+		// flag to mean anything about.
+		// The incoming leg also names the previous frame's depth writes: the HUD
+		// depth image is one image shared by every frame slot, so this pass's
+		// depth clear has to be ordered against the late fragment tests of the
+		// slot before it, which is what the outgoing leg's source scope names.
 		hudDeps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
 		hudDeps[0].dstSubpass = 0;
-		hudDeps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		hudDeps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+		                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+		                          VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
 		hudDeps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-		hudDeps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		hudDeps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT |
+		                           VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+		                           VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 		hudDeps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-		hudDeps[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+		hudDeps[0].dependencyFlags = 0;
 
 		hudDeps[1].srcSubpass = 0;
 		hudDeps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
@@ -1409,7 +1422,7 @@ static void vk_create_render_passes( void )
 		hudDeps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
 		                           VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 		hudDeps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-		hudDeps[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+		hudDeps[1].dependencyFlags = 0;
 
 		Com_Memset( &desc, 0, sizeof( desc ) );
 		desc.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -7768,9 +7781,16 @@ static void get_scissor_rect(VkRect2D *r) {
 		if (r->offset.y < 0)
 			r->offset.y = 0;
 
-		if (r->offset.x + r->extent.width > glConfig.vidWidth)
+		// extent fields are unsigned: guard the subtraction the same way
+		// clamp_clear_rect_to_render_area does, so an offset already past the
+		// bound yields a zero extent instead of wrapping to a huge one.
+		if (r->offset.x >= glConfig.vidWidth)
+			r->extent.width = 0;
+		else if (r->offset.x + r->extent.width > glConfig.vidWidth)
 			r->extent.width = glConfig.vidWidth - r->offset.x;
-		if (r->offset.y + r->extent.height > glConfig.vidHeight)
+		if (r->offset.y >= glConfig.vidHeight)
+			r->extent.height = 0;
+		else if (r->offset.y + r->extent.height > glConfig.vidHeight)
 			r->extent.height = glConfig.vidHeight - r->offset.y;
 	}
 }
@@ -7810,6 +7830,36 @@ static void get_mvp_transform( float *mvp )
 }
 
 
+// vk.renderWidth/Height name whatever target is actually bound (the HUD
+// buffer while that bracket is open); glConfig is only the eye buffer.
+static void clamp_clear_rect_to_render_area( VkRect2D *r ) {
+
+	if ( r->offset.x < 0 )
+		r->offset.x = 0;
+	if ( r->offset.y < 0 )
+		r->offset.y = 0;
+
+	// extent fields are unsigned: check the offset against the render area
+	// before subtracting, so an offset already past it yields a zero extent
+	// instead of an underflowed (huge) one. The offset comes back to the bound
+	// with it, because containment is tested as offset plus extent and an empty
+	// rect left beyond the render area still fails that test.
+	if ( r->offset.x >= vk.renderWidth ) {
+		r->offset.x = (int32_t)vk.renderWidth;
+		r->extent.width = 0;
+	} else if ( r->offset.x + r->extent.width > vk.renderWidth ) {
+		r->extent.width = vk.renderWidth - r->offset.x;
+	}
+
+	if ( r->offset.y >= vk.renderHeight ) {
+		r->offset.y = (int32_t)vk.renderHeight;
+		r->extent.height = 0;
+	} else if ( r->offset.y + r->extent.height > vk.renderHeight ) {
+		r->extent.height = vk.renderHeight - r->offset.y;
+	}
+}
+
+
 void vk_clear_color( const vec4_t color ) {
 
 	VkClearAttachment attachment;
@@ -7834,6 +7884,12 @@ void vk_clear_color( const vec4_t color ) {
 	attachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 
 	get_scissor_rect( &clear_rect.rect );
+	clamp_clear_rect_to_render_area( &clear_rect.rect );
+	// vkCmdClearAttachments requires both extents above zero, and an empty rect
+	// clears nothing anyway. Both the clamp above and get_scissor_rect can hand
+	// one back: a rect starting past the render area, or a zero-sized viewport.
+	if ( clear_rect.rect.extent.width == 0 || clear_rect.rect.extent.height == 0 )
+		return;
 	clear_rect.baseArrayLayer = 0;
 	// Q3VR: In multiview render passes, layerCount must be 1 - the view mask
 	// automatically broadcasts the clear to all active views (both eyes)
@@ -7868,6 +7924,12 @@ void vk_clear_depth( qboolean clear_stencil ) {
 	}
 
 	get_scissor_rect( &clear_rect[0].rect );
+	clamp_clear_rect_to_render_area( &clear_rect[0].rect );
+	// as in vk_clear_color: an empty rect is not a legal clear rect, and
+	// dirty_depth_attachment is left alone because only a render pass load-op
+	// clear resets it
+	if ( clear_rect[0].rect.extent.width == 0 || clear_rect[0].rect.extent.height == 0 )
+		return;
 	clear_rect[0].baseArrayLayer = 0;
 	// Q3VR: In multiview render passes, layerCount must be 1 - the view mask
 	// automatically broadcasts the clear to all active views (both eyes)
@@ -9544,9 +9606,6 @@ void vk_end_frame( void )
 	vk.recordingCommands = qfalse;
 
 	// Submit command buffer with fence
-	// Only signal renderingCompleteSem if desktop mirror is enabled: it must be consumed each frame.
-	// If we signal it but desktop mirror doesn't run (disabled, minimized, etc), the semaphore
-	// remains signaled and the next vk_end_frame will cause a double-signal validation error.
 	{
 		submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 		submit_info.pNext = NULL;
@@ -9564,6 +9623,14 @@ void vk_end_frame( void )
 		submit_info.commandBufferCount = bufferCount;
 		submit_info.pCommandBuffers = buffers;
 
+		// A signal no blit consumed is still outstanding, and signaling a
+		// semaphore that is already signaled and unwaited is invalid. The
+		// mirror drains it on the skip paths it knows about, but a frame it
+		// never runs on at all leaves it set, and the arm below that does not
+		// signal used to discard the flag along with the client's only record
+		// of it.
+		vk_drain_rendering_semaphore();
+
 		if ( mirrorEnabled && !vk_is_window_minimized() && vk.swapchain != VK_NULL_HANDLE ) {
 			submit_info.signalSemaphoreCount = 1;
 			submit_info.pSignalSemaphores = &vk.renderingCompleteSem;
@@ -9571,7 +9638,6 @@ void vk_end_frame( void )
 		} else {
 			submit_info.signalSemaphoreCount = 0;
 			submit_info.pSignalSemaphores = NULL;
-			vk.renderingCompleteSemSignaled = qfalse;
 		}
 
 		VK_CHECK( qvkQueueSubmit( vk.queue, 1, &submit_info, vk.cmd->rendering_finished_fence ) );
@@ -10229,7 +10295,9 @@ static void vk_drain_rendering_semaphore( void )
 		submit_info.signalSemaphoreCount = 0;
 		submit_info.pSignalSemaphores = NULL;
 
-		qvkQueueSubmit( vk.queue, 1, &submit_info, VK_NULL_HANDLE );
+		// The flag is only cleared past the check, so a failed drain can never
+		// leave the semaphore signaled with the client recording otherwise.
+		VK_CHECK( qvkQueueSubmit( vk.queue, 1, &submit_info, VK_NULL_HANDLE ) );
 		vk.renderingCompleteSemSignaled = qfalse;
 	}
 }
@@ -11085,10 +11153,16 @@ finish_desktop_mirror:
 	// End and submit command buffer
 	VK_CHECK( qvkEndCommandBuffer( vk.desktopBlitCmd ) );
 
-	// Submit blit command buffer
-	// - Wait on acquire semaphore: ensures presentation engine is done reading before we write
-	// - Wait on renderingCompleteSem: ensures XR rendering is done before we read virtualScreenImage
-	//   (only if vk_end_frame submitted this frame: renderingCompleteSignaled indicates successful submit)
+	// Submit blit command buffer. Both waits are at ALL_COMMANDS rather than
+	// TRANSFER because record_image_layout_transition takes each barrier's source
+	// stage from the old layout, so the transitions above run at TOP_OF_PIPE (the
+	// acquired image out of UNDEFINED), at COLOR_ATTACHMENT_OUTPUT and
+	// FRAGMENT_SHADER (the XR image in and out of sampling) and at TRANSFER, and a
+	// TRANSFER wait orders none of the first three. This is one submission a frame
+	// and sits outside the measured span, so a mask that covers every stage beats
+	// one matched per barrier that would rot as mirror styles are added.
+	// - Acquire semaphore: presentation engine is done reading before we write
+	// - renderingCompleteSem: XR rendering is done before we sample its output
 	// - Signal per-image semaphore: indexed by acquired image, presentation waits on this
 	{
 		VkSemaphore waitSemaphores[2];
@@ -11096,13 +11170,13 @@ finish_desktop_mirror:
 		uint32_t waitCount;
 
 		waitSemaphores[0] = vk.desktopAcquireSem;
-		waitStages[0] = VK_PIPELINE_STAGE_TRANSFER_BIT;
+		waitStages[0] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 		waitCount = 1;
 
 		// Only wait on renderingCompleteSem if vk_end_frame actually signaled it this frame
 		if ( vk.renderingCompleteSemSignaled ) {
 			waitSemaphores[1] = vk.renderingCompleteSem;
-			waitStages[1] = VK_PIPELINE_STAGE_TRANSFER_BIT;
+			waitStages[1] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 			waitCount = 2;
 			vk.renderingCompleteSemSignaled = qfalse;  // Consumed
 		}
@@ -11694,9 +11768,18 @@ qboolean vk_create_xr_image_views( void )
 
 	// Create color views (multiview array)
 	for ( uint32_t i = 0; i < xr->colorInfo->imageCount && i < MAX_SWAPCHAIN_IMAGES; i++ ) {
+		// The runtime's swapchain images carry storage usage this client never
+		// asked for and an sRGB view cannot support; a view with no usage chained
+		// inherits the image's full usage set, so each view below names only what
+		// it is actually created for.
+		VkImageViewUsageCreateInfo colorViewUsage = {
+			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+			.pNext = NULL,
+			.usage = VK_IMAGE_USAGE_SAMPLED_BIT,  // desktop mirror's 2D_ARRAY descriptor
+		};
 		VkImageViewCreateInfo viewInfo = {
 			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-			.pNext = NULL,
+			.pNext = &colorViewUsage,
 			.flags = 0,
 			.image = xr->colorInfo->images[i],
 			.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY,
@@ -11722,7 +11805,13 @@ qboolean vk_create_xr_image_views( void )
 		// The gamma shader outputs sRGB-encoded values directly, so we need to
 		// bypass Vulkan's automatic linear-to-sRGB conversion on write
 		{
+			VkImageViewUsageCreateInfo gammaViewUsage = {
+				.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+				.pNext = NULL,
+				.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,  // virtual-screen, direct-mode and gamma-pass framebuffers
+			};
 			VkImageViewCreateInfo gammaViewInfo = viewInfo;
+			gammaViewInfo.pNext = &gammaViewUsage;
 			gammaViewInfo.format = vk_get_unorm_format( xr->colorInfo->format );
 			VK_CHECK( qvkCreateImageView( vk.device, &gammaViewInfo, NULL, &xr->gammaViews[i] ) );
 		}
@@ -11731,9 +11820,14 @@ qboolean vk_create_xr_image_views( void )
 		// These are 2D views into each layer of the multiview array, using UNORM format
 		// to match the gamma-corrected output (no automatic sRGB decode on read)
 		for ( uint32_t eye = 0; eye < 2 && eye < xr->colorInfo->arraySize; eye++ ) {
+			VkImageViewUsageCreateInfo eyeViewUsage = {
+				.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+				.pNext = NULL,
+				.usage = VK_IMAGE_USAGE_SAMPLED_BIT,  // desktop mirror's per-eye descriptor
+			};
 			VkImageViewCreateInfo eyeViewInfo = {
 				.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-				.pNext = NULL,
+				.pNext = &eyeViewUsage,
 				.flags = 0,
 				.image = xr->colorInfo->images[i],
 				.viewType = VK_IMAGE_VIEW_TYPE_2D,  // Single layer, not array

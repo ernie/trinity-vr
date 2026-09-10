@@ -9,12 +9,14 @@
 #include "vr_vk_swapchains.h"
 #include "vr_vk.h"
 
+#include "../client/client.h"
+
 #include "../vrcommon/vr_base.h"
+#include "../vrcommon/vr_debug.h"
 #include "../vrcommon/vr_macros.h"
 #include "../vrcommon/vr_swapchains.h"
 
 #include <stdlib.h>
-#include <stdio.h>
 
 //
 // Internal helpers
@@ -63,12 +65,34 @@ static void VR_VK_CreateSwapchain(
 			format,                        // sRGB for normal rendering
 			vk_get_unorm_format(format)    // UNORM for gamma pass (bypass sRGB conversion)
 		};
+		const VR_Bool formatListEnabled = VR_HasEnabledInstanceExtension("XR_KHR_vulkan_swapchain_format_list");
 
-		fprintf(stderr, "[VRVK] Creating color swapchain with format list: sRGB=0x%x, UNORM=0x%x\n",
-			(unsigned int)viewFormats[0], (unsigned int)viewFormats[1]);
+		// Validation reports UNORM views on sRGB images the runtime created
+		// without VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT. These lines are the
+		// evidence for the next capture to say whether the runtime ignored
+		// this request or never saw it.
+		// The runtime's identity belongs with them, because there is a third
+		// outcome the other lines cannot show: vr_base.c records that a runtime
+		// reading XR_API_VERSION_1_0's patch level as the app's SDK version
+		// hands back a legacy profile that ignores the XrSwapchainCreateInfo
+		// next chain, which is where the format list is attached. Under that
+		// profile every line below reads positively and the request still never
+		// arrives.
+		Com_Printf("[VRVK] Color swapchain: runtime %s, declared API %s\n",
+			VR_GetRuntimeDescription(), VR_GetDeclaredApiVersion());
+		Com_Printf("[VRVK] Color swapchain: XR_KHR_vulkan_swapchain_format_list %s on the instance\n",
+			formatListEnabled ? "enabled" : "NOT enabled");
+		Com_Printf("[VRVK] Color swapchain: usage flags 0x%llx, mutable format bit %s\n",
+			(unsigned long long)usage, (usage & XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT) ? "set" : "NOT set");
+		Com_Printf("[VRVK] Color swapchain: format list chained, sRGB=0x%x UNORM=0x%x%s\n",
+			(unsigned int)viewFormats[0], (unsigned int)viewFormats[1],
+			(viewFormats[0] == viewFormats[1]) ? " (equal - request is a no-op)" : "");
 
 		result = VR_Vulkan_CreateSwapchainWithFormatList(session, format, width, height,
 			arraySize, usage, viewFormats, 2, &info->swapchain);
+
+		Com_Printf("[VRVK] Color swapchain: xrCreateSwapchain result %d (%s)\n",
+			(int)result, GetXRErrorString(result));
 	} else {
 		result = VR_Vulkan_CreateSwapchain(session, format, width, height,
 			arraySize, usage, &info->swapchain);
@@ -150,7 +174,7 @@ VR_SwapchainInfos* VR_VK_CreateSwapchains(XrInstance instance, XrSystemId system
 	const VkFormat colorFormat = VR_Vulkan_SelectColorFormat(formats, formatCount);
 	free(formats);
 
-	fprintf(stderr, "[VRVK] Chosen VK color format: 0x%x\n", (unsigned int)colorFormat);
+	Com_Printf("[VRVK] Chosen VK color format: 0x%x\n", (unsigned int)colorFormat);
 
 	// Calculate supersampled resolution
 	int supersampledWidth = views[0].recommendedImageRectWidth;
@@ -177,7 +201,7 @@ VR_SwapchainInfos* VR_VK_CreateSwapchains(XrInstance instance, XrSystemId system
 		viewCount,  // arraySize = 2 for stereo
 		&swapchains->color);
 
-	fprintf(stderr, "[VRVK] Created color swapchain: %dx%d, %u images, %u layers\n",
+	Com_Printf("[VRVK] Created color swapchain: %dx%d, %u images, %u layers\n",
 		swapchains->color.width, swapchains->color.height,
 		swapchains->color.imageCount, swapchains->color.arraySize);
 
