@@ -93,15 +93,11 @@ typedef struct vr_shared_s {
 	int   menuStickNavActive;   // engine: thumbstick is driving menu nav -> UI freezes hover + hides cursor
 } vr_shared_t;
 
-// Block-start field markers. Only the _FIRST names are load-bearing: the ABI
-// asserts in vr_shared_sync.c pin their offsets so a layout change that would
-// silently corrupt cross-writer state fails the build. The per-writer sync-out
-// copies fields by hand (not by offsetof range); the _LAST names are unused.
+// Block-start field markers. The ABI asserts in vr_shared_sync.c pin their
+// offsets so a layout change that would silently corrupt cross-writer state
+// fails the build. The per-writer sync-out copies each field by name.
 #define VR_SHARED_CG_FIRST   weapon_select
-#define VR_SHARED_CG_LAST    probeEcho
 #define VR_SHARED_UI_FIRST   menuYaw
-#define VR_SHARED_UI_LAST    scoreboardCursorActive
 #define VR_SHARED_CFG_FIRST  no_crosshair
-#define VR_SHARED_CFG_LAST   single_player
 
 #endif
