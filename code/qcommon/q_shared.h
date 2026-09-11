@@ -40,10 +40,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 //  #define LEGACY_PROTOCOL	// You probably don't need this for your standalone game
 //  #define PROTOCOL_HANDLER		"foobar"
 #else
-  #define PRODUCT_NAME				"q3vr"
+  #define PRODUCT_NAME				"trinityvr"
   #define BASEGAME					"baseq3"
-  #define CLIENT_WINDOW_TITLE		"quake3vr"
-  #define CLIENT_WINDOW_MIN_TITLE	"q3vr"
+  #define CLIENT_WINDOW_TITLE		"Trinity VR"
+  #define CLIENT_WINDOW_MIN_TITLE	"Trinity VR"
   #define HOMEPATH_NAME_UNIX		".trinityvr"
   #define HOMEPATH_NAME_WIN			"TrinityVR"
   #define HOMEPATH_NAME_MACOSX		HOMEPATH_NAME_WIN
