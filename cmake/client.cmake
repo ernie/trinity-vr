@@ -183,12 +183,3 @@ install(
     DIRECTORY "${CMAKE_SOURCE_DIR}/assets/third_party/demo/" DESTINATION
     $<PATH:RELATIVE_PATH,$<TARGET_FILE_DIR:${PRIMARY_CLIENT}>/baseq3/,${CMAKE_BINARY_DIR}/$<CONFIG>>
     COMPONENT q3a_demo)
-if(WIN32)
-    install(FILES "${CMAKE_SOURCE_DIR}/misc/update-trinity.bat" DESTINATION
-        $<PATH:RELATIVE_PATH,$<TARGET_FILE_DIR:${PRIMARY_CLIENT}>/,${CMAKE_BINARY_DIR}/$<CONFIG>>
-        COMPONENT game_engine)
-else()
-    install(PROGRAMS "${CMAKE_SOURCE_DIR}/misc/update-trinity.sh" DESTINATION
-        $<PATH:RELATIVE_PATH,$<TARGET_FILE_DIR:${PRIMARY_CLIENT}>/,${CMAKE_BINARY_DIR}/$<CONFIG>>
-        COMPONENT game_engine)
-endif()

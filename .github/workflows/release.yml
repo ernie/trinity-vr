@@ -170,8 +170,6 @@ jobs:
         with:
           sparse-checkout: |
             TRINITY_VERSION
-            misc/update-trinity.bat
-            misc/update-trinity.sh
 
       # Same pin the build jobs compiled the module libraries from: the paks
       # bundled below must come from that exact trinity release, byte-verbatim.
@@ -203,13 +201,6 @@ jobs:
               find "$dir" -type d -name baseq3 -exec cp trinity-assets/zzz-trinity-announcer.pk3 {} \;
             fi
           done
-
-      - name: Bundle update scripts
-        run: |
-          for dir in windows-msvc windows-mingw; do
-            [ -d "$dir" ] && cp misc/update-trinity.bat "$dir/"
-          done
-          [ -d linux ] && cp misc/update-trinity.sh linux/
 
       # Transitional bridge: old q3vr installs match the q3vr-* asset and need a
       # q3vr-named exe in the payload so Sys_ApplyPendingUpdate replaces their
