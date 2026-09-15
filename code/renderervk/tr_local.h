@@ -1224,6 +1224,8 @@ typedef struct {
 	int			mainSceneWidth;
 	int			mainSceneHeight;
 	float		combinedFovX;              // Combined stereo horizontal FOV for culling
+	float		fovUp;                     // Degrees above forward, top cull plane
+	float		fovDown;                   // Degrees below forward, bottom cull plane
 	float		halfIpdMeters;             // Half IPD in meters for frustum plane offset
 } vrParms_t;
 
@@ -2149,6 +2151,8 @@ void RE_SetVRHeadsetParms( const float projectionMatrix[16],
 						   const float projectionEye0[16],
 						   const float projectionEye1[16],
 						   float combinedFovX,
+						   float fovUp,
+						   float fovDown,
 						   float halfIpdMeters );
 void RE_SetFoveation( int level, qboolean eyeTracked, const float centers[2][2], const float fovTan[2][4] );
 void RE_ClearVRFramebuffer( int width, int height, qboolean isThirdPersonSpectator );

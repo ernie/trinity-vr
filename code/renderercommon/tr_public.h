@@ -106,7 +106,7 @@ typedef struct {
 
 	void	(*SetVRHeadsetParms)( const float projectionMatrix[16], const float nonVRProjectionMatrix[16], int renderBuffer,
 								  const float projectionEye0[16], const float projectionEye1[16],
-								  float combinedFovX, float halfIpdMeters );
+								  float combinedFovX, float fovUp, float fovDown, float halfIpdMeters );
 
 	// Authored shading rate map. Centers are per-eye NDC with y running down the
 	// image; fovTan is each eye's frustum as { tanLeft, tanRight, tanUp, tanDown },

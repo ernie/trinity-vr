@@ -2154,6 +2154,8 @@ void RE_SetVRHeadsetParms( const float projectionMatrix[16],
 						   const float projectionEye0[16],
 						   const float projectionEye1[16],
 						   float combinedFovX,
+						   float fovUp,
+						   float fovDown,
 						   float halfIpdMeters ) {
 	// Mark VR parameters as valid
 	tr.vrParms.valid = qtrue;
@@ -2197,6 +2199,8 @@ void RE_SetVRHeadsetParms( const float projectionMatrix[16],
 
 	// Store frustum parameters
 	tr.vrParms.combinedFovX = combinedFovX;
+	tr.vrParms.fovUp = fovUp;
+	tr.vrParms.fovDown = fovDown;
 	tr.vrParms.halfIpdMeters = halfIpdMeters;
 	tr.vrParms.renderBuffer = renderBuffer;
 
